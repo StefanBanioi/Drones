@@ -18,10 +18,17 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+import isaaclab.sim as sim_utils
+from isaaclab.actuators import ImplicitActuatorCfg
+from isaaclab.assets.articulation import ArticulationCfg
+from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
+
 
 ##
 # Pre-defined configs
 ##
+from isaaclab_assets import UR10_CFG
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
@@ -49,9 +56,9 @@ class QuadcopterEnvWindow(BaseEnvWindow):
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 10.0
+    episode_length_s = 4 # seconds
     decimation = 2
-    action_space = 4
+    action_space = 4 # this means we have 4 actions output.
     observation_space = 12
     state_space = 0
     debug_vis = True
@@ -85,12 +92,54 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
+    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
+    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1000, env_spacing=2.5, replicate_physics=True)
 
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
     # robot
     robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
     moment_scale = 0.01
+
+    # Table 
+    table: sim_utils.UsdFileCfg = sim_utils.UsdFileCfg(
+        usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd", scale=(2.0, 2.0, 2.0)
+        )
+
+
+    UR10_CFG = ArticulationCfg(
+        prim_path="/World/envs/env_.*/UR10",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/UniversalRobots/UR10/ur10_instanceable.usd",
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
+                max_depenetration_velocity=5.0,
+            ),
+            activate_contact_sensors=False,
+        ),
+        init_state=ArticulationCfg.InitialStateCfg(
+            joint_pos={
+                "shoulder_pan_joint": 0.0,
+                "shoulder_lift_joint": -1.712,
+                "elbow_joint": 1.712,
+                "wrist_1_joint": 0.0,
+                "wrist_2_joint": 0.0,
+                "wrist_3_joint": 0.0,
+            },
+        ),
+        actuators={
+            "arm": ImplicitActuatorCfg(
+                joint_names_expr=[".*"],
+                velocity_limit=100.0,
+                effort_limit=87.0,
+                stiffness=800.0,
+                damping=40.0,
+            ),
+        },
+    )
+    """Configuration of UR-10 arm using implicit actuator models."""
+
+
 
     # reward scales
     lin_vel_reward_scale = -0.05
@@ -133,9 +182,32 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot = Articulation(self.cfg.robot)
         self.scene.articulations["robot"] = self._robot
 
+        # # Comment this out if you want to use the UR10 arm or you still run into issues:
+        # 2025-04-21 15:47:18 [18,867ms] [Warning] [omni.physx.plugin] Detected an articulation 
+        # at /World/envs/env_0/UR10 with more than 4 velocity iterations being added to a TGS scene.
+        # The related behavior changed recently, please consult the changelog. This warning will only print once.
+        #self._finalUr10 = Articulation(self.cfg.UR10_CFG)
+        #self.scene.articulations["UR10"] = self._finalUr10
+
+        # ur10_cfg.init_state.pos = (0.0, 0.0, 1.03)
+        # ur10 = Articulation(cfg=ur10_cfg)
+
+        # # -- Table
+        # cfg = sim_utils.UsdFileCfg(
+        # usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd", scale=(2.0, 2.0, 2.0)
+        # )
+        # cfg.func("/World/Origin2/Table", cfg, translation=(0.0, 0.0, 1.03))
+        # # -- Robot
+        # ur10_cfg = UR10_CFG.replace(prim_path="/World/Origin2/Robot")
+        # ur10_cfg.init_state.pos = (0.0, 0.0, 1.03)
+        # ur10 = Articulation(cfg=ur10_cfg)
+            
+
+
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
+        
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
         # add lights
@@ -164,7 +236,7 @@ class QuadcopterEnv(DirectRLEnv):
             dim=-1,
         )
         observations = {"policy": obs}
-        return observations
+        return observations #this step is neccesary as its the model input
 
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)

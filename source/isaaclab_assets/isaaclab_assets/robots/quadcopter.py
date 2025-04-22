@@ -20,6 +20,8 @@ CRAZYFLIE_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
         usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Crazyflie/cf2x.usd",
+        # Scale to 3x for better visibility and more realistic simulation as the final drone will be larger
+        scale=(3.0, 3.0, 3.0), 
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=10.0,
@@ -35,7 +37,7 @@ CRAZYFLIE_CFG = ArticulationCfg(
         copy_from_source=False,
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.5),
+        pos=(0.0, 0.0, 1.0),
         joint_pos={
             ".*": 0.0,
         },
