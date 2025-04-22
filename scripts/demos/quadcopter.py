@@ -12,7 +12,7 @@ This script demonstrates how to simulate a quadcopter.
     ./isaaclab.sh -p scripts/demos/quadcopter.py
 
 """
-
+#this is a test as to ssee if it works or not. Hehe ;D
 """Launch Isaac Sim Simulator first."""
 
 import argparse
