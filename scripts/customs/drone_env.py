@@ -5,6 +5,24 @@
 
 from __future__ import annotations
 
+import argparse
+from isaaclab.app import AppLauncher
+# Add argparse arguments
+parser = argparse.ArgumentParser(description="This script demonstrates a UR10 robot arm and a drone.")
+parser.add_argument("--num_envs", type=int, default=8, help="Number of environments")
+
+# Append AppLauncher CLI args
+# This is a custom script, so we need to add the AppLauncher arguments to the parser
+AppLauncher.add_app_launcher_args(parser)
+args_cli = parser.parse_args()
+
+# Launch the Omniverse app
+app_launcher = AppLauncher(args_cli)
+simulation_app = app_launcher.app
+
+
+
+
 import gymnasium as gym
 import torch
 
@@ -16,22 +34,18 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.terrains import TerrainImporterCfg
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab_assets import UR10_CFG
+import isaacsim.core.utils.prims as prim_utils
+import numpy as np
 from isaaclab.utils import configclass
 from isaaclab.utils.math import subtract_frame_transforms
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
-from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
-from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg
-from isaaclab.assets import Articulation, RigidObject
-
 
 ##
 # Pre-defined configs
 ##
-from isaaclab_assets import UR10_CFG
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
@@ -56,12 +70,26 @@ class QuadcopterEnvWindow(BaseEnvWindow):
                     self._create_debug_vis_ui_element("targets", self.env)
 
 
+def define_origins(num_origins: int, spacing: float) -> list[list[float]]:
+    """Defines the origins of the the scene."""
+    # create tensor based on number of environments
+    env_origins = torch.zeros(num_origins, 3)
+    # create a grid of origins
+    num_rows = np.floor(np.sqrt(num_origins))
+    num_cols = np.ceil(num_origins / num_rows)
+    xx, yy = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols), indexing="xy")
+    env_origins[:, 0] = spacing * xx.flatten()[:num_origins] - spacing * (num_rows - 1) / 2
+    env_origins[:, 1] = spacing * yy.flatten()[:num_origins] - spacing * (num_cols - 1) / 2
+    env_origins[:, 2] = 0.0
+    # return the origins
+    return env_origins.tolist()
+
 @configclass
 class QuadcopterEnvCfg(DirectRLEnvCfg):
     # env
-    episode_length_s = 4 # seconds
+    episode_length_s = 10.0
     decimation = 2
-    action_space = 4 # this means we have 4 actions output.
+    action_space = 4
     observation_space = 12
     state_space = 0
     debug_vis = True
@@ -95,81 +123,80 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     )
 
     # scene
-    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
-    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1000, env_spacing=2.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
 
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
-    # robotDrone
-    robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    # robot
+    robot: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
     moment_scale = 0.01
 
-    # Table 
-    # table: sim_utils.UsdFileCfg = sim_utils.UsdFileCfg(
-    #     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd", scale=(2.0, 2.0, 2.0)
-    #     )
-    # this is incorrect, we need to use the table as a rigid object
-
-    # table object
-    table_cfg: RigidObjectCfg = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/table",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd",  # Or whatever table asset you prefer
-              # Adjust scale if needed
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True,  # Table is static
-                disable_gravity=True,    # Shouldn’t fall
-            ),
-            scale=(2.0, 2.0, 2.0),
-            mass_props=sim_utils.MassPropertiesCfg(density=0.0),  # Not necessary if it's kinematic
-           
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.03),  # Position table under robot
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-    )
-
-
-    UR10_CFG = ArticulationCfg(
-        prim_path="/World/envs/env_.*/UR10",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/UniversalRobots/UR10/ur10_instanceable.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
-                max_depenetration_velocity=5.0,
-            ),
-            activate_contact_sensors=False,
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos={
-                "shoulder_pan_joint": 0.0,
-                "shoulder_lift_joint": -1.712,
-                "elbow_joint": 1.712,
-                "wrist_1_joint": 0.0,
-                "wrist_2_joint": 0.0,
-                "wrist_3_joint": 0.0,
-            },
-        ),
-        actuators={
-            "arm": ImplicitActuatorCfg(
-                joint_names_expr=[".*"],
-                velocity_limit=100.0,
-                effort_limit=87.0,
-                stiffness=800.0,
-                damping=40.0,
-            ),
+    # robot2
+    robot2: ArticulationCfg = UR10_CFG.replace(
+        prim_path="/World/envs/env_.*/Robot2",
+            init_state=ArticulationCfg.InitialStateCfg(
+        joint_pos={
+            "shoulder_pan_joint": 0.0,
+            "shoulder_lift_joint": -1.712,
+            "elbow_joint": 1.712,
+            "wrist_1_joint": 0.0,
+            "wrist_2_joint": 0.0,
+            "wrist_3_joint": 0.0,
         },
+    ),
+    actuators={
+        "arm": ImplicitActuatorCfg(
+            joint_names_expr=[".*"],
+            velocity_limit=100.0,
+            effort_limit=87.0,
+            stiffness=800.0,
+            damping=40.0,
+        ),
+    },
     )
-    """Configuration of UR-10 arm using implicit actuator models."""
-
-
 
     # reward scales
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
 
+    def design_scene(self):
+        """Designs the scene with the UR10 robot and a drone."""
+        # Create a specific origin for the UR10 robot and a drone
+        # Ground-plane
+        cfg = sim_utils.GroundPlaneCfg()
+        cfg.func("/World/defaultGroundPlane", cfg)
+        # Lights
+        cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
+        cfg.func("/World/Light", cfg)
+
+        origins = define_origins(num_origins=2, spacing=2.5)
+
+        # Origin with UR10
+        prim_utils.create_prim("/World/Origin2", "Xform", translation=origins[0])
+        # -- Table
+        cfg = sim_utils.UsdFileCfg(
+            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd", scale=(2.0, 2.0, 2.0)
+        )
+        cfg.func("/World/Origin2/Table", cfg, translation=(0.0, 0.0, 1.03))
+        # -- Robot
+        ur10_cfg = UR10_CFG.replace(prim_path="/World/Origin2/Robot")
+        ur10_cfg.init_state.pos = (0.0, 0.0, 1.03)
+        ur10 = Articulation(cfg=ur10_cfg)
+
+        # -- Drone Setup
+        prim_utils.create_prim("/World/Origin3", "Xform", translation=origins[1])
+        drone_cfg = CRAZYFLIE_CFG.replace(prim_path="/World/Origin3/Drone")
+        drone_cfg.init_state.pos = (0.0, 0.0, 1.0)
+        drone_cfg.spawn.func("/World/Origin3/Drone", drone_cfg.spawn, translation=drone_cfg.init_state.pos)
+        drone = Articulation(cfg=drone_cfg)
+
+        # return the scene information with only the UR10 robot
+        scene_entities = {
+            "ur10": ur10,
+            "drone": drone,
+        }
+        return scene_entities, origins
+    
 
 class QuadcopterEnv(DirectRLEnv):
     cfg: QuadcopterEnvCfg
@@ -202,22 +229,25 @@ class QuadcopterEnv(DirectRLEnv):
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
 
+
     def _setup_scene(self):
-        self._robot = Articulation(self.cfg.robotDrone)
-        self.scene.articulations["robotDrone"] = self._robot
-        self._finalUr10 = Articulation(self.cfg.UR10_CFG)
-        self.scene.articulations["UR10"] = self._finalUr10
-        
+        self._robot = Articulation(self.cfg.robot)
+        self.scene.articulations["robot"] = self._robot
+
+        # Add second robot (UR10 arm)
+        self._robot2 = Articulation(self.cfg.robot2)
+        self.scene.articulations["robot2"] = self._robot2
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
-        
-        # clone and replicate
+
         self.scene.clone_environments(copy_from_source=False)
-        # add lights
+
+        # Add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone().clamp(-1.0, 1.0)
@@ -241,7 +271,7 @@ class QuadcopterEnv(DirectRLEnv):
             dim=-1,
         )
         observations = {"policy": obs}
-        return observations #this step is neccesary as its the model input
+        return observations
 
     def _get_rewards(self) -> torch.Tensor:
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
@@ -296,7 +326,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
-        # Reset robotDrone state
+        # Reset robot state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
@@ -323,3 +353,32 @@ class QuadcopterEnv(DirectRLEnv):
     def _debug_vis_callback(self, event):
         # update the markers
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
+
+def main():
+    """Main function."""
+    # Initialize the simulation context
+    sim_cfg = sim_utils.SimulationCfg(device=args_cli.device)
+    sim = sim_utils.SimulationContext(sim_cfg)
+    # Set main camera
+    sim.set_camera_view([3.5, 0.0, 3.2], [0.0, 0.0, 0.5])
+    # Design the scene with the UR10 robot and drone
+    scene_entities, scene_origins = QuadcopterEnvCfg().design_scene()
+    scene_origins = torch.tensor(scene_origins, device=sim.device)
+    # Play the simulator
+    sim.reset()
+    # Now we are ready!
+    print("[INFO]: Setup complete...")
+    # Run the simulator
+    # Placeholder for the run_simulator function
+    # Define or import the function as needed
+    def run_simulator(sim, scene_entities, scene_origins):
+        print("[INFO]: Running simulator...")
+        # Add simulation logic here
+
+    run_simulator(sim, scene_entities, scene_origins)
+
+if __name__ == "__main__":
+    # Run the main function
+    main()
+    # Close the simulation app
+    simulation_app.close()
