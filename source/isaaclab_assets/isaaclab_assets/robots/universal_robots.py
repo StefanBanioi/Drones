@@ -32,11 +32,18 @@ UR10_CFG = ArticulationCfg(
         activate_contact_sensors=False,
     ),
     init_state=ArticulationCfg.InitialStateCfg(
+        #add an initial position for the arm
+        pos=(-1.0, 0.0, 0.5),
+        #add an initial position for the arm joints 
         joint_pos={
             "shoulder_pan_joint": 0.0,
             "shoulder_lift_joint": -1.712,
             "elbow_joint": 1.712,
-            "wrist_1_joint": 0.0,
+
+
+            #this is where you can change the position of the wrist joints
+            #these joints represent the last 3 joints of the arm furthest from the base
+            "wrist_1_joint": 0.0, 
             "wrist_2_joint": 0.0,
             "wrist_3_joint": 0.0,
         },
