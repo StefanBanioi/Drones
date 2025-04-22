@@ -37,7 +37,7 @@ CRAZYFLIE_CFG = ArticulationCfg(
         copy_from_source=False,
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 1.0),
+        pos=(1.0, 2.0, 1.5),
         joint_pos={
             ".*": 0.0,
         },
