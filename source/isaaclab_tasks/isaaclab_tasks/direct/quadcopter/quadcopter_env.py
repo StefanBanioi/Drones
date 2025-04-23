@@ -64,7 +64,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     #action_space = 4 # this means we have 4 actions output. (for only the drone)
     action_space = 10 # this means we have 10 actions output. (for the drone 4 + the arm 6)
     #observation_space = 12 # this means we have 12 observations (for the drone)
-    observation_space = 12 # this means we have 18 observations (for the drone 12 + the arm 6)
+    observation_space = 24 # this means we have 24 observations (for the drone 12 + the arm 12)
     state_space = 0
     debug_vis = True
 
@@ -82,6 +82,7 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
             restitution=0.0,
         ),
     )
+    
     terrain = TerrainImporterCfg(
         prim_path="/World/ground",
         terrain_type="plane",
@@ -96,42 +97,11 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
-    # scene
-    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=True)
-    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1000, env_spacing=2.5, replicate_physics=True)
-
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
     # robotDrone
     robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
     moment_scale = 0.01
-
-    # Table 
-    # table: sim_utils.UsdFileCfg = sim_utils.UsdFileCfg(
-    #     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd", scale=(2.0, 2.0, 2.0)
-    #     )
-    # this is incorrect, we need to use the table as a rigid object
-
-    # table object
-    table_cfg: RigidObjectCfg = RigidObjectCfg(
-        prim_path="/World/envs/env_.*/table",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Mounts/Stand/stand_instanceable.usd",  # Or whatever table asset you prefer
-              # Adjust scale if needed
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True,  # Table is static
-                disable_gravity=True,    # Shouldn’t fall
-            ),
-            scale=(2.0, 2.0, 2.0),
-            mass_props=sim_utils.MassPropertiesCfg(density=0.0),  # Not necessary if it's kinematic
-           
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 1.03),  # Position table under robot
-            rot=(1.0, 0.0, 0.0, 0.0),
-        ),
-    )
-
 
     UR10_CFG = ArticulationCfg(
         prim_path="/World/envs/env_.*/UR10",
@@ -224,19 +194,24 @@ class QuadcopterEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone().clamp(-1.0, 1.0)
 
-        # Drone thrust and moment (old)
-        # self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
-        # self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
-
         # Drone thrust and moment (new)
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
         self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:4]
 
-        # UR10 joint targets (rescale from [-1, 1] to reasonable joint angles)
+        # UR10 joint targets
         joint_targets = self._actions[:, 4:] * torch.tensor(
             [2.0, 2.0, 2.0, 3.14, 3.14, 3.14], device=self.device
-        ) 
+        )
         self._finalUr10.set_joint_position_target(joint_targets)
+
+        # ✅ Update desired_pos_w (target for drone) to UR10 end-effector position
+        ee_indices = self._finalUr10.find_bodies("ee_link")
+        if len(ee_indices) == 0:
+            raise RuntimeError("Could not find 'ee_link' on UR10!")
+        
+        # Always fetch the current ee_link position each step
+        ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 3]
+        self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
 
     def _apply_action(self):
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
@@ -255,14 +230,14 @@ class QuadcopterEnv(DirectRLEnv):
 
         obs = torch.cat(
             [
-                self._robot.data.root_lin_vel_b,
-                self._robot.data.root_ang_vel_b,
-                self._robot.data.projected_gravity_b,
-                desired_pos_b,
+                self._robot.data.root_lin_vel_b,        #(3,)
+                self._robot.data.root_ang_vel_b,        #(3,)
+                self._robot.data.projected_gravity_b,   #(3,)
+                desired_pos_b,                          #(3,)
 
                 # add the joint state of the UR10 arm
-                #joint_pos,
-                #joint_vel,
+                joint_pos,                              #(6,)
+                joint_vel,                              #(6,)
 
 
             ],
@@ -273,25 +248,43 @@ class QuadcopterEnv(DirectRLEnv):
         return observations #this step is neccesary as its the model input
 
     def _get_rewards(self) -> torch.Tensor:
+        # Velocity penalties/rewards — from the drone
         lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
+        
+        # Distance from drone to robot end-effector (goal)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
         }
+
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
+
         # Logging
         for key, value in rewards.items():
             self._episode_sums[key] += value
+
         return reward
+
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = torch.logical_or(self._robot.data.root_pos_w[:, 2] < 0.1, self._robot.data.root_pos_w[:, 2] > 2.0)
         return died, time_out
+
+
+
+
+
+
+
+
+
+    #This is the old one DO NOT DELETE
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -314,7 +307,11 @@ class QuadcopterEnv(DirectRLEnv):
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
         self.extras["log"].update(extras)
 
+        # Reset the robotDrone 
         self._robot.reset(env_ids)
+        # Reset the UR10 arm
+        self._finalUr10.reset(env_ids)
+
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:
             # Spread out the resets to avoid spikes in training when many environments reset at a similar time
@@ -325,6 +322,7 @@ class QuadcopterEnv(DirectRLEnv):
         self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
         self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
         self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+        
         # Reset robotDrone state
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
@@ -333,6 +331,63 @@ class QuadcopterEnv(DirectRLEnv):
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # Reset UR10 arm state
+        joint_pos = self._finalUr10.data.default_joint_pos[env_ids]
+        joint_vel = self._finalUr10.data.default_joint_vel[env_ids]
+        default_root_state = self._finalUr10.data.default_root_state[env_ids]
+        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        self._finalUr10.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        self._finalUr10.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        self._finalUr10.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+
+    # def _reset_idx(self, env_ids: torch.Tensor | None):
+    #     if env_ids is None or len(env_ids) == self.num_envs:
+    #         env_ids = self._robot._ALL_INDICES
+
+    #     # Logging
+    #     final_distance_to_goal = torch.linalg.norm(
+    #         self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids], dim=1
+    #     ).mean()
+    #     extras = dict()
+    #     for key in self._episode_sums.keys():
+    #         episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
+    #         extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
+    #         self._episode_sums[key][env_ids] = 0.0
+    #     self.extras["log"] = dict()
+    #     self.extras["log"].update(extras)
+    #     extras = dict()
+    #     extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+    #     extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+    #     extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
+    #     self.extras["log"].update(extras)
+
+    #     # Reset the drone and arm
+    #     self._robot.reset(env_ids)
+    #     self._finalUr10.reset(env_ids)
+
+    #     # ✅ Get the ee_link position (assuming it's called "ee_link")
+    #     ee_indices = self._finalUr10.find_bodies("ee_link")  # use correct link name
+    #     if len(ee_indices) == 0:
+    #         raise RuntimeError("Could not find 'ee_link' on UR10!")
+    #     ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 3]
+
+    #     # 🔧 Assign to desired position
+    #     #self._desired_pos_w[env_ids] = ee_pos[env_ids]  # Make sure both sides are shape [num_envs, 3]
+    #     #self._desired_pos_w[env_ids] = ee_pos[env_ids].reshape(-1, 3) # THIS One works but the drones are dead?
+    #     self._desired_pos_w[env_ids] = ee_pos[env_ids].squeeze(1)
+
+
+
+    #     # Call parent reset
+    #     super()._reset_idx(env_ids)
+
+    #     if len(env_ids) == self.num_envs:
+    #         # Spread out the resets to avoid spikes in training
+    #         self._robot.data.root_state_w[:, :3] += torch.randn_like(self._robot.data.root_state_w[:, :3]) * 0.1
+
+
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         # create markers if necessary for the first tome
