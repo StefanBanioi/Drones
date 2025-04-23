@@ -61,8 +61,10 @@ class QuadcopterEnvCfg(DirectRLEnvCfg):
     # env
     episode_length_s = 4 # seconds
     decimation = 2
-    action_space = 4 # this means we have 4 actions output.
-    observation_space = 12
+    #action_space = 4 # this means we have 4 actions output. (for only the drone)
+    action_space = 10 # this means we have 10 actions output. (for the drone 4 + the arm 6)
+    #observation_space = 12 # this means we have 12 observations (for the drone)
+    observation_space = 12 # this means we have 18 observations (for the drone 12 + the arm 6)
     state_space = 0
     debug_vis = True
 
@@ -221,26 +223,53 @@ class QuadcopterEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone().clamp(-1.0, 1.0)
+
+        # Drone thrust and moment (old)
+        # self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
+        # self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
+
+        # Drone thrust and moment (new)
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
-        self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:]
+        self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:4]
+
+        # UR10 joint targets (rescale from [-1, 1] to reasonable joint angles)
+        joint_targets = self._actions[:, 4:] * torch.tensor(
+            [2.0, 2.0, 2.0, 3.14, 3.14, 3.14], device=self.device
+        ) 
+        self._finalUr10.set_joint_position_target(joint_targets)
 
     def _apply_action(self):
         self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
     def _get_observations(self) -> dict:
+
+
+        # Get the desired position in world space
         desired_pos_b, _ = subtract_frame_transforms(
             self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7], self._desired_pos_w
         )
+
+        # UR10 joint state 
+        joint_pos = self._finalUr10.data.joint_pos
+        joint_vel = self._finalUr10.data.joint_vel
+
         obs = torch.cat(
             [
                 self._robot.data.root_lin_vel_b,
                 self._robot.data.root_ang_vel_b,
                 self._robot.data.projected_gravity_b,
                 desired_pos_b,
+
+                # add the joint state of the UR10 arm
+                #joint_pos,
+                #joint_vel,
+
+
             ],
             dim=-1,
         )
         observations = {"policy": obs}
+
         return observations #this step is neccesary as its the model input
 
     def _get_rewards(self) -> torch.Tensor:

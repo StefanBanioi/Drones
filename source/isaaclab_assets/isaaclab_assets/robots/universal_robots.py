@@ -37,7 +37,7 @@ UR10_CFG = ArticulationCfg(
         #add an initial position for the arm joints 
         joint_pos={
 
-            #these joints represent the first 4 joints of the arm closest to the base
+            #these joints represent the first 3 joints of the arm closest to the base
             "shoulder_pan_joint": 0.0,
             
             "shoulder_lift_joint": -1.712,
