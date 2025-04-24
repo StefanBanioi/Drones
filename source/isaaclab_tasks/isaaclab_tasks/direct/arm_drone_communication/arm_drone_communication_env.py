@@ -5,151 +5,27 @@
 
 from __future__ import annotations
 
-import gymnasium as gym
+import math
 import torch
+from collections.abc import Sequence
+import gymnasium as gym
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, ArticulationCfg
-from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
-from isaaclab.envs.ui import BaseEnvWindow
-from isaaclab.markers import VisualizationMarkers
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sim import SimulationCfg
-from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.utils import configclass
+from isaaclab.assets import Articulation
+from isaaclab.envs import DirectRLEnv
+from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from isaaclab.utils.math import sample_uniform
 from isaaclab.utils.math import subtract_frame_transforms
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
-import isaaclab.sim as sim_utils
-from isaaclab.actuators import ImplicitActuatorCfg
-from isaaclab.assets.articulation import ArticulationCfg
-from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
-from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
-from isaaclab.assets import ArticulationCfg, RigidObjectCfg
-from isaaclab.assets import Articulation, RigidObject
-
-
-##
-# Pre-defined configs
-##
-from isaaclab_assets import UR10_CFG
-from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
+from isaaclab.markers import VisualizationMarkers
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
-
-class QuadcopterEnvWindow(BaseEnvWindow):
-    """Window manager for the Quadcopter environment."""
-
-    def __init__(self, env: QuadcopterEnv, window_name: str = "IsaacLab"):
-        """Initialize the window.
-
-        Args:
-            env: The environment object.
-            window_name: The name of the window. Defaults to "IsaacLab".
-        """
-        # initialize base window
-        super().__init__(env, window_name)
-        # add custom UI elements
-        with self.ui_window_elements["main_vstack"]:
-            with self.ui_window_elements["debug_frame"]:
-                with self.ui_window_elements["debug_vstack"]:
-                    # add command manager visualization
-                    self._create_debug_vis_ui_element("targets", self.env)
+from .arm_drone_communication_env_cfg import ArmDroneCommunicationEnvCfg
 
 
-@configclass
-class QuadcopterEnvCfg(DirectRLEnvCfg):
-    # env
-    #episode_length_s = 4 # seconds
-    
-    # going to try a little test where the episode_length is less than 4 seconds (try to converge faster)
-    episode_length_s = 2 # seconds
+class ArmDroneCommunicationEnv(DirectRLEnv):
+    cfg: ArmDroneCommunicationEnvCfg
 
-    decimation = 2
-    #action_space = 4 # this means we have 4 actions output. (for only the drone)
-    action_space = 10 # this means we have 10 actions output. (for the drone 4 + the arm 6)
-    #observation_space = 12 # this means we have 12 observations (for the drone)
-    observation_space = 24 # this means we have 24 observations (for the drone 12 + the arm 12)
-    state_space = 0
-    debug_vis = True
-
-    ui_window_class_type = QuadcopterEnvWindow
-
-    # simulation
-    sim: SimulationCfg = SimulationCfg(
-        dt=1 / 100,
-        render_interval=decimation,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-    )
-    
-    terrain = TerrainImporterCfg(
-        prim_path="/World/ground",
-        terrain_type="plane",
-        collision_group=-1,
-        physics_material=sim_utils.RigidBodyMaterialCfg(
-            friction_combine_mode="multiply",
-            restitution_combine_mode="multiply",
-            static_friction=1.0,
-            dynamic_friction=1.0,
-            restitution=0.0,
-        ),
-        debug_vis=False,
-    )
-
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
-    # robotDrone
-    robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    thrust_to_weight = 1.9
-    moment_scale = 0.01
-
-    UR10_CFG = ArticulationCfg(
-        prim_path="/World/envs/env_.*/UR10",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/UniversalRobots/UR10/ur10_instanceable.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
-                max_depenetration_velocity=5.0,
-            ),
-            activate_contact_sensors=False,
-        ),
-        init_state=ArticulationCfg.InitialStateCfg(
-            joint_pos={
-                "shoulder_pan_joint": 0.0,
-                "shoulder_lift_joint": -1.712,
-                "elbow_joint": 1.712,
-                "wrist_1_joint": 0.0,
-                "wrist_2_joint": 0.0,
-                "wrist_3_joint": 0.0,
-            },
-        ),
-        actuators={
-            "arm": ImplicitActuatorCfg(
-                joint_names_expr=[".*"],
-                velocity_limit=100.0,
-                effort_limit=87.0,
-                stiffness=800.0,
-                damping=40.0,
-            ),
-        },
-    )
-    """Configuration of UR-10 arm using implicit actuator models."""
-
-
-    # reward scales
-    lin_vel_reward_scale = -0.05
-    ang_vel_reward_scale = -0.01
-    distance_to_goal_reward_scale = 15.0
-
-
-class QuadcopterEnv(DirectRLEnv):
-    cfg: QuadcopterEnvCfg
-
-    def __init__(self, cfg: QuadcopterEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: ArmDroneCommunicationEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
         # Total thrust and moment applied to the base of the quadcopter
