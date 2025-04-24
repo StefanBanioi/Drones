@@ -24,7 +24,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     #episode_length_s = 4 # seconds
     
     # going to try a little test where the episode_length is less than 4 seconds (try to converge faster)
-    episode_length_s = 2 # seconds
+    episode_length_s = 4 # seconds
 
     decimation = 2
     #action_space = 4 # this means we have 4 actions output. (for only the drone)
@@ -104,3 +104,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
     distance_to_goal_reward_scale = 15.0
+    smooth_landing_bonus = 2.0  # Tune as needed
+    proximity_bonus = 5.0       # Strong bonus when drone is really close
+    time_bonus_scale = 1.0      # Scales with how fast it finishes
+    orientation_reward_scale = 1.0  # Reward for pointing ee_link up

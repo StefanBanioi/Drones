@@ -17,6 +17,9 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import sample_uniform
 from isaaclab.utils.math import subtract_frame_transforms
 from isaaclab.markers import VisualizationMarkers
+from isaaclab.utils.math import quat_apply
+
+
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
 
 from .arm_drone_communication_env_cfg import ArmDroneCommunicationEnvCfg
@@ -42,6 +45,10 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 "lin_vel",
                 "ang_vel",
                 "distance_to_goal",
+                "smooth_landing",
+                "proximity",
+                "time_shaping",
+                "orientation_reward",
             ]
         }
         # Get specific body indices
@@ -135,10 +142,34 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
 
+        # --- Smooth landing reward (close + slow) ---
+        is_close = distance_to_goal < 0.3
+        is_slow = lin_vel < 0.1
+        smooth_landing = (is_close & is_slow).float() 
+        # --- Bonus for being very close to the target ---
+        proximity = (distance_to_goal < 0.1).float() 
+
+        # --- Time-based shaping (inverse of time taken) ---
+        time_shaping = (1.0 - (self.episode_length_buf / self.max_episode_length)) 
+
+        # --- Orientation reward: keep UR10 ee_link pointing up ---
+        # UR10 Z-axis should align with world Z-axis [0, 0, 1]
+        # Assuming ee_link's orientation is available in quaternion
+        ee_quat = self._finalUr10.data.body_quat_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 4]
+        vec = torch.tensor([0, 0, 1], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)  # [N, 3]
+        up_vector = quat_apply(ee_quat, vec)  # [N, 3]
+        z_alignment = up_vector[:, 2]
+        orientation_reward = torch.clamp(z_alignment, 0.0, 1.0) * self.cfg.orientation_reward_scale
+
+
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "smooth_landing": smooth_landing * self.cfg.smooth_landing_bonus * self.step_dt,
+            "proximity": proximity * self.cfg.proximity_bonus * self.step_dt,
+            "time_shaping": time_shaping * self.cfg.time_bonus_scale * self.step_dt,
+            "orientation_reward": orientation_reward * self.step_dt,
         }
 
         reward = torch.sum(torch.stack(list(rewards.values())), dim=0)
@@ -187,25 +218,38 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
         self._actions[env_ids] = 0.0
-        # Sample new commands
-        self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
-        self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
-        self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
+
+
+        # This maked the desired pos random which I do not want currently so just comment it out ;D
+        # self._desired_pos_w[env_ids, :2] = torch.zeros_like(self._desired_pos_w[env_ids, :2]).uniform_(-2.0, 2.0)
+        # self._desired_pos_w[env_ids, :2] += self._terrain.env_origins[env_ids, :2]
+        # self._desired_pos_w[env_ids, 2] = torch.zeros_like(self._desired_pos_w[env_ids, 2]).uniform_(0.5, 1.5)
         
-        # Reset robotDrone state
+        # -----------------------------
+        # Randomize robotDrone initial position
+        # -----------------------------
         joint_pos = self._robot.data.default_joint_pos[env_ids]
         joint_vel = self._robot.data.default_joint_vel[env_ids]
         default_root_state = self._robot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # X
+        default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # Y
+        default_root_state[:, 2] += torch.zeros(len(env_ids)).uniform_(0.0, 0.5).to(default_root_state.device)   # Z
+
         self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # Reset UR10 arm state
+        # -----------------------------
+        # Randomize UR10 initial position
+        # -----------------------------
         joint_pos = self._finalUr10.data.default_joint_pos[env_ids]
         joint_vel = self._finalUr10.data.default_joint_vel[env_ids]
         default_root_state = self._finalUr10.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # X
+        default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # Y
+
         self._finalUr10.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._finalUr10.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._finalUr10.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
