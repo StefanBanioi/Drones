@@ -156,7 +156,12 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # UR10 Z-axis should align with world Z-axis [0, 0, 1]
         # Assuming ee_link's orientation is available in quaternion
         ee_quat = self._finalUr10.data.body_quat_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 4]
-        vec = torch.tensor([0, 0, 1], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)  # [N, 3]
+        
+        # this is not the correct orientation (need to update the ee_link orientation)
+        #vec = torch.tensor([0, 0, 1], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)  # [N, 3]
+
+        vec = torch.tensor([0, 1, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3) # [N, 3]
+
         up_vector = quat_apply(ee_quat, vec)  # [N, 3]
         z_alignment = up_vector[:, 2]
         orientation_reward = torch.clamp(z_alignment, 0.0, 1.0) * self.cfg.orientation_reward_scale

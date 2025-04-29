@@ -100,14 +100,50 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     """Configuration of UR-10 arm using implicit actuator models."""
 
 
-    #reward scales
-    lin_vel_reward_scale = -0.05
-    ang_vel_reward_scale = -0.01
-    distance_to_goal_reward_scale = 15.0 
-    smooth_landing_bonus = 10.0  # This is a bonus for smooth landing 
-    proximity_bonus = 25.0       # Strong bonus when drone is really close 
-    time_bonus_scale = 1.0      # Scales with how fast it finishes
-    orientation_reward_scale = 1.0  # Reward for pointing ee_link up
+    # reward scales
+    lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
+    ang_vel_reward_scale = -0.01           # Penalize angular velocity (drone)
+    distance_to_goal_reward_scale = 15.0   # Reward approaching robot EE
+    smooth_landing_bonus = 10.0            # Bonus when drone is both slow and close
+    proximity_bonus = 25.0                 # Bonus when drone is very close
+    time_bonus_scale = 1.0                 # Encourage early task completion
+    orientation_reward_scale = 10.0         # Encourage robot EE to face upwards
+
+    # punishments
+    unstable_penalty = -2.0                # Penalty when drone is unstable
+    time_penalty = -0.01                   # Per-step penalty to encourage speed
+    angular_vel_threshold = 0.5            # Threshold for defining "unstable"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # #reward scales
+    # lin_vel_reward_scale = -0.05
+    # ang_vel_reward_scale = -0.01
+    # distance_to_goal_reward_scale = 15.0 
+    # smooth_landing_bonus = 10.0  # This is a bonus for smooth landing 
+    # proximity_bonus = 25.0       # Strong bonus when drone is really close 
+    # time_bonus_scale = 1.0      # Scales with how fast it finishes
+    # orientation_reward_scale = 1.0  # Reward for pointing ee_link up
 
     #test 2
     # Same reward scales but keep everything at 1.0 except for the orientation reward scale
