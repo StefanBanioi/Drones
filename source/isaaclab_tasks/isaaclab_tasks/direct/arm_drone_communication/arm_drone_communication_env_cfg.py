@@ -100,12 +100,75 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     """Configuration of UR-10 arm using implicit actuator models."""
 
 
-    # reward scales
+    #reward scales
     lin_vel_reward_scale = -0.05
     ang_vel_reward_scale = -0.01
-    distance_to_goal_reward_scale = 15.0
-    smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
+    distance_to_goal_reward_scale = 15.0 
+    smooth_landing_bonus = 10.0  # This is a bonus for smooth landing 
     proximity_bonus = 25.0       # Strong bonus when drone is really close 
-    #(it was 5 now 25) see if it helps to converge faster but also make the drone closer to the arm more often
     time_bonus_scale = 1.0      # Scales with how fast it finishes
     orientation_reward_scale = 1.0  # Reward for pointing ee_link up
+
+    #test 2
+    # Same reward scales but keep everything at 1.0 except for the orientation reward scale
+    # lin_vel_reward_scale = -0.05
+    # ang_vel_reward_scale = -0.01
+    # distance_to_goal_reward_scale = 1.0
+    # smooth_landing_bonus = 1.0  # Tune as needed 
+    # proximity_bonus = 1.0       # Strong bonus when drone is really close
+    # time_bonus_scale = 1.0      # Scales with how fast it finishes
+    # orientation_reward_scale = 10  # Reward for pointing ee_link up
+
+    #test 3
+    # Abusrd value for the orientation reward scale
+    # lin_vel_reward_scale = -0.05
+    # ang_vel_reward_scale = -0.01
+    # distance_to_goal_reward_scale = 1.0
+    # smooth_landing_bonus = 1.0  # Tune as needed
+    # proximity_bonus = 1.0       # Strong bonus when drone is really close
+    # time_bonus_scale = 1.0      # Scales with how fast it finishes
+    # orientation_reward_scale = 1000  # Reward for pointing ee_link up
+    # This is a test to see if the orientation reward even matters or works
+
+    #test 5
+    # lin_vel_reward_scale = -0.05
+    # ang_vel_reward_scale = -0.01
+    # distance_to_goal_reward_scale = 15.0
+    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
+    # proximity_bonus = 25.0       # Strong bonus when drone is really close 
+    # time_bonus_scale = 1.0      # Scales with how fast it finishes
+    # orientation_reward_scale = 1.0  # Reward for pointing ee_link up
+
+
+    
+    #test 6
+    # lin_vel_reward_scale = -0.05
+    # ang_vel_reward_scale = -0.01
+    # distance_to_goal_reward_scale = 15.0
+    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
+    # proximity_bonus = 15.0       # Strong bonus when drone is really close 
+    # time_bonus_scale = 1.0      # Scales with how fast it finishes
+    # orientation_reward_scale = 25.0  # Reward for pointing ee_link up
+
+
+    # #test 7
+    # #with changes suggested by chatgpt
+    # lin_vel_reward_scale = -0.05
+    # ang_vel_reward_scale = -0.01
+    # distance_to_goal_reward_scale = 15.0
+    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
+    # proximity_bonus = 15.0       # Strong bonus when drone is really close
+    # time_bonus_scale = 1.0      # Scales with how fast it finishes
+    # orientation_reward_scale = 100.0 # Reward for pointing ee_link up
+    # upright_bonus_scale = 50.0 
+
+    # #test 8
+
+    # lin_vel_reward_scale = -0.05
+    # ang_vel_reward_scale = -0.01
+    # distance_to_goal_reward_scale = 15.0
+    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
+    # proximity_bonus = 25.0       # Strong bonus when drone is really close 
+    # time_bonus_scale = 1.0      # Scales with how fast it finishes
+    # orientation_reward_scale = 10 # Reward for pointing ee_link up
+    # upright_bonus_scale = 20.0

@@ -52,8 +52,8 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             ]
         }
         # Get specific body indices
-        self._body_id = self._robot.find_bodies("body")[0]
-        self._robot_mass = self._robot.root_physx_view.get_masses()[0].sum()
+        self._body_id = self._DroneRobot.find_bodies("body")[0]
+        self._robot_mass = self._DroneRobot.root_physx_view.get_masses()[0].sum()
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
@@ -61,8 +61,8 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self.set_debug_vis(self.cfg.debug_vis)
 
     def _setup_scene(self):
-        self._robot = Articulation(self.cfg.robotDrone)
-        self.scene.articulations["robotDrone"] = self._robot
+        self._DroneRobot = Articulation(self.cfg.robotDrone)
+        self.scene.articulations["robotDrone"] = self._DroneRobot
         self._finalUr10 = Articulation(self.cfg.UR10_CFG)
         self.scene.articulations["UR10"] = self._finalUr10
         
@@ -100,14 +100,14 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
 
     def _apply_action(self):
-        self._robot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
+        self._DroneRobot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
     def _get_observations(self) -> dict:
 
 
         # Get the desired position in world space
         desired_pos_b, _ = subtract_frame_transforms(
-            self._robot.data.root_state_w[:, :3], self._robot.data.root_state_w[:, 3:7], self._desired_pos_w
+            self._DroneRobot.data.root_state_w[:, :3], self._DroneRobot.data.root_state_w[:, 3:7], self._desired_pos_w
         )
 
         # UR10 joint state 
@@ -116,9 +116,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
         obs = torch.cat(
             [
-                self._robot.data.root_lin_vel_b,        #(3,)
-                self._robot.data.root_ang_vel_b,        #(3,)
-                self._robot.data.projected_gravity_b,   #(3,)
+                self._DroneRobot.data.root_lin_vel_b,        #(3,)
+                self._DroneRobot.data.root_ang_vel_b,        #(3,)
+                self._DroneRobot.data.projected_gravity_b,   #(3,)
                 desired_pos_b,                          #(3,)
 
                 # add the joint state of the UR10 arm
@@ -135,11 +135,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
     def _get_rewards(self) -> torch.Tensor:
         # Velocity penalties/rewards — from the drone
-        lin_vel = torch.sum(torch.square(self._robot.data.root_lin_vel_b), dim=1)
-        ang_vel = torch.sum(torch.square(self._robot.data.root_ang_vel_b), dim=1)
+        lin_vel = torch.sum(torch.square(self._DroneRobot.data.root_lin_vel_b), dim=1)
+        ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
         
         # Distance from drone to robot end-effector (goal)
-        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._robot.data.root_pos_w, dim=1)
+        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
 
         # --- Smooth landing reward (close + slow) ---
@@ -183,16 +183,16 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.logical_or(self._robot.data.root_pos_w[:, 2] < 0.1, self._robot.data.root_pos_w[:, 2] > 2.0)
+        died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0)
         return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
-            env_ids = self._robot._ALL_INDICES
+            env_ids = self._DroneRobot._ALL_INDICES
 
         # Logging
         final_distance_to_goal = torch.linalg.norm(
-            self._desired_pos_w[env_ids] - self._robot.data.root_pos_w[env_ids], dim=1
+            self._desired_pos_w[env_ids] - self._DroneRobot.data.root_pos_w[env_ids], dim=1
         ).mean()
         extras = dict()
         for key in self._episode_sums.keys():
@@ -208,7 +208,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self.extras["log"].update(extras)
 
         # Reset the robotDrone 
-        self._robot.reset(env_ids)
+        self._DroneRobot.reset(env_ids)
         # Reset the UR10 arm
         self._finalUr10.reset(env_ids)
 
@@ -228,17 +228,17 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # -----------------------------
         # Randomize robotDrone initial position
         # -----------------------------
-        joint_pos = self._robot.data.default_joint_pos[env_ids]
-        joint_vel = self._robot.data.default_joint_vel[env_ids]
-        default_root_state = self._robot.data.default_root_state[env_ids]
+        joint_pos = self._DroneRobot.data.default_joint_pos[env_ids]
+        joint_vel = self._DroneRobot.data.default_joint_vel[env_ids]
+        default_root_state = self._DroneRobot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
         default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # X
         default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # Y
         default_root_state[:, 2] += torch.zeros(len(env_ids)).uniform_(0.0, 0.5).to(default_root_state.device)   # Z
 
-        self._robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        self._robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-        self._robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+        self._DroneRobot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        self._DroneRobot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        self._DroneRobot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
         # -----------------------------
         # Randomize UR10 initial position
