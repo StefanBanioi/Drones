@@ -107,7 +107,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     smooth_landing_bonus = 10.0            # Bonus when drone is both slow and close
     proximity_bonus = 25.0                 # Bonus when drone is very close
     time_bonus_scale = 1.0                 # Encourage early task completion
-    orientation_reward_scale = 10.0         # Encourage robot EE to face upwards
+    orientation_reward_scale = 25.0        # Encourage robot EE to face upwards
 
     # punishments
     unstable_penalty = -2.0                # Penalty when drone is unstable

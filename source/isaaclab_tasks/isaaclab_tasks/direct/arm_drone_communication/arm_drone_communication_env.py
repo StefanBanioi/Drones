@@ -18,6 +18,8 @@ from isaaclab.utils.math import sample_uniform
 from isaaclab.utils.math import subtract_frame_transforms
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import quat_apply
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 
 
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
@@ -153,19 +155,36 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         time_shaping = (1.0 - (self.episode_length_buf / self.max_episode_length)) 
 
         # --- Orientation reward: keep UR10 ee_link pointing up ---
-        # UR10 Z-axis should align with world Z-axis [0, 0, 1]
+        # UR10 X-axis should align with world Z-axis [0, 0, 1]
         # Assuming ee_link's orientation is available in quaternion
         ee_quat = self._finalUr10.data.body_quat_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 4]
         
-        # this is not the correct orientation (need to update the ee_link orientation)
-        #vec = torch.tensor([0, 0, 1], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)  # [N, 3]
-
-        vec = torch.tensor([0, 1, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3) # [N, 3]
-
-        up_vector = quat_apply(ee_quat, vec)  # [N, 3]
+        # Try all three local axes to see which one we actually want pointing up
+        local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
+        local_y = torch.tensor([0, 1, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
+        local_z = torch.tensor([0, 0, 1], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
+        
+        # Transform all three axes to world space
+        world_x = quat_apply(ee_quat, local_x)
+        world_y = quat_apply(ee_quat, local_y)
+        world_z = quat_apply(ee_quat, local_z)
+        
+        # Store these for debug visualization
+        self._ee_local_axes_in_world = [world_x, world_y, world_z]
+        
+        # Use X-axis for alignment as that seems to be the one that should point upward
+        up_vector = world_x
+        
+        # Measure alignment with world Z [0,0,1] - this gives a value between -1 and 1
         z_alignment = up_vector[:, 2]
-        orientation_reward = torch.clamp(z_alignment, 0.0, 1.0) * self.cfg.orientation_reward_scale
-
+        
+        # Reward positive alignment AND penalize negative alignment
+        # When alignment is positive (pointing up): reward proportionally
+        # When alignment is negative (pointing down): penalize proportionally
+        orientation_reward = z_alignment * self.cfg.orientation_reward_scale
+        
+        # Log the actual alignment values for debugging
+        self._ee_alignment = z_alignment
 
         rewards = {
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
@@ -260,20 +279,54 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self._finalUr10.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-        # create markers if necessary for the first tome
-        if debug_vis:
-            if not hasattr(self, "goal_pos_visualizer"):
-                marker_cfg = CUBOID_MARKER_CFG.copy()
-                marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
-                # -- goal pose
-                marker_cfg.prim_path = "/Visuals/Command/goal_position"
-                self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
-            # set their visibility to true
-            self.goal_pos_visualizer.set_visibility(True)
-        else:
-            if hasattr(self, "goal_pos_visualizer"):
-                self.goal_pos_visualizer.set_visibility(False)
+            # create markers if necessary for the first tome
+            if debug_vis:
+                if not hasattr(self, "goal_pos_visualizer"):
+                    marker_cfg = CUBOID_MARKER_CFG.copy()
+                    marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
+                    # -- goal pose
+                    marker_cfg.prim_path = "/Visuals/Command/goal_position"
+                    self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
+                    
+                # Add frame marker for end effector
+                if not hasattr(self, "ee_frame_visualizer"):
+                    frame_marker_cfg = VisualizationMarkersCfg(
+                        prim_path="/Visuals/EndEffector/frame",
+                        markers={
+                            "frame": sim_utils.UsdFileCfg(
+                                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                                scale=(0.05, 0.05, 0.05),
+                            )
+                        }
+                    )
+                    self.ee_frame_visualizer = VisualizationMarkers(frame_marker_cfg)
+                    
+                # set their visibility to true
+                self.goal_pos_visualizer.set_visibility(True)
+                if hasattr(self, "ee_frame_visualizer"):
+                    self.ee_frame_visualizer.set_visibility(True)
+            else:
+                if hasattr(self, "goal_pos_visualizer"):
+                    self.goal_pos_visualizer.set_visibility(False)
+                if hasattr(self, "ee_frame_visualizer"):
+                    self.ee_frame_visualizer.set_visibility(False)
 
     def _debug_vis_callback(self, event):
         # update the markers
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
+        
+        # Update end effector frame marker
+        if hasattr(self, "ee_frame_visualizer"):
+            ee_indices = self._finalUr10.find_bodies("ee_link")
+            if len(ee_indices) > 0:
+                ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
+                ee_quat = self._finalUr10.data.body_quat_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
+                self.ee_frame_visualizer.visualize(ee_pos, ee_quat)
+                
+                #Print alignment value for debugging
+                if hasattr(self, "_ee_alignment"):
+                    alignment = self._ee_alignment[0].item()  # Get the first environment's alignment
+                    # Only print every 100 steps to avoid flooding the console
+                    if self.step_count % 100 == 0:
+                        print(f"EE alignment with world up: {alignment:.4f} - " +
+                              f"{'GOOD (pointing up)' if alignment > 0.7 else 'POOR (not pointing up)'}")
