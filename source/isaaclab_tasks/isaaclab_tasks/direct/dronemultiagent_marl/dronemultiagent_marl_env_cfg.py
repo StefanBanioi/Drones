@@ -24,7 +24,6 @@ from isaaclab.utils import configclass
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
-#test
 @configclass
 class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # env
