@@ -17,11 +17,13 @@ class TestMarlEnvCfg(DirectMARLEnvCfg):
     # env
     decimation = 2
     episode_length_s = 5.0
+
     # multi-agent specification and spaces definition
     possible_agents = ["cart", "pendulum"]
-    action_spaces = {"cart": 1, "pendulum": 1}
+    action_spaces = {"cart": 1, "pendulum": 1} 
     observation_spaces = {"cart": 4, "pendulum": 3}
     state_space = -1
+
 
     # simulation
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
@@ -40,6 +42,7 @@ class TestMarlEnvCfg(DirectMARLEnvCfg):
     # - action scale
     cart_action_scale = 100.0  # [N]
     pendulum_action_scale = 50.0  # [Nm]
+
     # - reward scales
     rew_scale_alive = 1.0
     rew_scale_terminated = -2.0
@@ -49,6 +52,7 @@ class TestMarlEnvCfg(DirectMARLEnvCfg):
     rew_scale_pole_vel = -0.01
     rew_scale_pendulum_pos = -1.0
     rew_scale_pendulum_vel = -0.01
+    
     # - reset states/conditions
     initial_pendulum_angle_range = [-0.25, 0.25]  # pendulum angle sample range on reset [rad]
     initial_pole_angle_range = [-0.25, 0.25]  # pole angle sample range on reset [rad]
