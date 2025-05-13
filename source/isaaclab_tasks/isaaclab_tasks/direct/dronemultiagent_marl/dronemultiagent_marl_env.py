@@ -384,7 +384,22 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0)
+<<<<<<< HEAD
         return died, time_out
+=======
+
+        terminated = {
+            "_DroneRobot": died,
+            "_Ur10Arm": died,  # or a custom condition for the UR10 if needed
+        }
+        time_outs = {
+            "_DroneRobot": time_out,
+            "_Ur10Arm": time_out,
+        }
+
+        return terminated, time_outs
+>>>>>>> parent of 3602070e1 (Updates)
+
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
