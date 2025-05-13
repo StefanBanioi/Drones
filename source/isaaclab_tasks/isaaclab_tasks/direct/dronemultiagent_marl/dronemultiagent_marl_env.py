@@ -381,21 +381,10 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         return {"_Ur10Arm": ur10_reward, "_DroneRobot": drone_total_reward}
 
-    def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0)
-
-        terminated = {
-            "_DroneRobot": died,
-            "_Ur10Arm": died,  # or a custom condition for the UR10 if needed
-        }
-        time_outs = {
-            "_DroneRobot": time_out,
-            "_Ur10Arm": time_out,
-        }
-
-        return terminated, time_outs
-
+        return died, time_out
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -458,8 +447,8 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
 
         obs = self._get_observations()
-        # print(f"[RESET DEBUG] DroneRobot observation shape: {obs['_DroneRobot'].shape}")
-        # print(f"[RESET DEBUG] UR10 Arm observation shape: {obs['_Ur10Arm'].shape}")
+        print(f"[RESET DEBUG] DroneRobot observation shape: {obs['_DroneRobot'].shape}")
+        print(f"[RESET DEBUG] UR10 Arm observation shape: {obs['_Ur10Arm'].shape}")
 
     def _set_debug_vis_impl(self, debug_vis: bool):
             # create markers if necessary for the first tome
