@@ -22,9 +22,7 @@ from isaaclab.utils.math import quat_apply
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
-
 from isaaclab.markers import CUBOID_MARKER_CFG  
-
 from .dronemultiagent_marl_env_cfg import DronemultiagentMarlEnvCfg
         
 
@@ -34,7 +32,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     def __init__(self, cfg: DronemultiagentMarlEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         
-
         self._actions = {}
 
         # === UR10 Arm Initialization ===
@@ -55,11 +52,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self.arm_dof_lower_limits = joint_limits[..., 0]
         self.arm_dof_upper_limits = joint_limits[..., 1]
 
-        # === Drone Initialization ===
-        # Usually drones don't use DOF targets in the same way, but you might want to store desired thrusts or velocities
-        # self.num_drone_actions = self.cfg.action_spaces["_DroneRobot"]
-        # self.drone_actions = torch.zeros((self.num_envs, self.num_drone_actions), dtype=torch.float, device=self.device)
-
         # === Goal setup (optional, based on your reward function) ===
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.goal_pos[:] = torch.tensor([0.0, 0.0, 1.0], device=self.device)  # Example: 1m above base
@@ -71,23 +63,24 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                "lin_vel",
-                "ang_vel",
-                "distance_to_goal",
-                "smooth_landing",
-                "proximity",
-                "time_shaping",
+                "lin_vel_penalty",
+                "ang_vel_penalty",
+                "distance_reward",
+                "smooth_landing_bonus",
+                "proximity_bonus",
+                "time_shaping_reward",
                 "orientation_reward",
+                "died_penalty",
             ]
         }
+
         # Get specific body indices
         self._body_id = self._DroneRobot.find_bodies("body")[0]
-        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum()) *27.0 # scale to 3x size
+        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum()) *27.0 # scale to 3x size (volume scales with the cube of length)
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
-        # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
-        self.set_debug_vis(self.cfg.debug_vis)
+    
 
         # Unit tensors (optional, useful for directional reward calculations)
         self.x_unit_tensor = torch.tensor([1, 0, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
@@ -103,27 +96,24 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # Use live UR10 end-effector position as drone's target
         ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 1, 3]
         self._desired_pos_w = ee_pos.squeeze(1)  # Save as [num_envs, 3]
+        if torch.rand(1).item() < 0.01:
+            print(f"[DEBUG] desired_pos_w avg Z: {self._desired_pos_w[:, 2].mean():.3f}")
+
 
         self.arm_curr_targets = torch.zeros_like(self._Ur10Arm.data.joint_pos)
         self.arm_prev_targets = torch.zeros_like(self._Ur10Arm.data.joint_pos)
 
-
-
-
-
-
         self._thrust = torch.zeros((self.num_envs, 1, 3), device=self.device)
         self._moment = torch.zeros((self.num_envs, 1, 3), device=self.device)
         
-
-
-
-
         # Added from the pre_physics_step function
         self.ee_pos = torch.zeros(self.num_envs, 3, device=self.device)
         self.ee_quat = torch.zeros(self.num_envs, 4, device=self.device)
         self.ee_lin_vel = torch.zeros(self.num_envs, 3, device=self.device)
         self.ee_ang_vel = torch.zeros(self.num_envs, 3, device=self.device)
+        
+        # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
+        self.set_debug_vis(self.cfg.debug_vis)
 
     def _setup_scene(self):
         # Add drone, arm, and ground plane to the scene
@@ -131,7 +121,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self.scene.articulations["Drone_CFG"] = self._DroneRobot
         self._Ur10Arm = Articulation(self.cfg.UR10_CFG)
         self.scene.articulations["UR10"] = self._Ur10Arm
-        
 
         self.cfg.terrain.num_envs = self.scene.cfg.num_envs
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
@@ -143,22 +132,19 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-
     def _pre_physics_step(self, actions: dict[str, torch.Tensor]) -> None:
         # Clamp and store actions
         self._actions["_Ur10Arm"] = actions["_Ur10Arm"].clone().clamp(-1.0, 1.0)
         self._actions["_DroneRobot"] = actions["_DroneRobot"].clone().clamp(-1.0, 1.0)
 
-        # Update goal position based on UR10 end-effector
-        # self._desired_pos_w = self._Ur10Arm.data.body_pos_w[:, self.ee_idx, :]
-
-        # # Cache ee kinematic states
-        # self.ee_pos = self._Ur10Arm.data.body_pos_w[:, self.ee_idx, :] # [num_envs, 3]
-        # self.ee_quat = self._Ur10Arm.data.body_quat_w[:, self.ee_idx, :] # [num_envs, 4]
-        # self.ee_lin_vel = self._Ur10Arm.data.body_lin_vel_w[:, self.ee_idx, :] # [num_envs, 3]
-        # self.ee_ang_vel = self._Ur10Arm.data.body_ang_vel_w[:, self.ee_idx, :] # [num_envs, 3]
-
-
+                # Update desired_pos_w (target for drone) to UR10 end-effector position
+        ee_indices = self._Ur10Arm.find_bodies("ee_link")
+        if len(ee_indices) == 0:
+            raise RuntimeError("Could not find 'ee_link' on UR10!")
+        
+        # Always fetch the current ee_link position each step
+        ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 3]
+        self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
 
     def _apply_action(self) -> None:
         # === Drone ===
@@ -218,8 +204,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         )
         self._Ur10Arm.set_joint_position_target(joint_targets)
      
-       
-
     def _compute_drone_obs(self) -> torch.Tensor:
         return torch.cat((
             self._DroneRobot.data.root_pos_w[:, 0, :],
@@ -238,7 +222,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             self.actions["_Ur10Arm"],
         ), dim=-1)
 
-
     def _get_observations(self) -> dict[str, torch.Tensor]:
         observations = {
             "_Ur10Arm": torch.cat(
@@ -250,7 +233,9 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                     self.ee_lin_vel,
                     self.ee_ang_vel,
                     self.actions["_Ur10Arm"],
-                    self.goal_pos,  # could also be `self.ee_pos` depending on goal logic
+                    
+                    # put this to _desired_pos_w as this is the ee_pos
+                    self._desired_pos_w, 
                 ),
                 dim=-1,
             ),
@@ -266,16 +251,14 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                     self._DroneRobot.data.root_ang_vel_w,
                     # Previously applied actions
                     self.actions["_DroneRobot"],
-                    # Goal
-                    self.goal_pos,
+                    # Goal again put as _desired_pos_w as this is the ee_pos
+                    self._desired_pos_w,
                 ),
                 dim=-1,
             ),
         }
         return observations
         
-    
-    
     def _get_states(self) -> torch.Tensor:
         states = torch.cat(
             (
@@ -294,36 +277,47 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                 self._DroneRobot.data.root_ang_vel_w,
                 self.actions["_DroneRobot"],
                 # === Goal ===
-                self.goal_pos,
+                self._desired_pos_w, # this is the ee_pos (Note to self: Change the naming of this variable to ee_pos as its easier to understand :D )
             ),
             dim=-1,
         )
         return states
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
-        # Velocity penalties/rewards — from the drone
+        # --- DRONE STABILITY PENALTIES ---
+        # Penalize linear velocity to encourage gentle landings
         lin_vel = torch.sum(torch.square(self._DroneRobot.data.root_lin_vel_b), dim=1)
-        ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
-        
-        # Distance from drone to robot end-effector (goal)
-        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
-        distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
+        lin_vel_penalty = lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt
 
-        # --- Smooth landing reward (close + slow) ---
+        # Penalize angular velocity to encourage upright and stable orientation
+        ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
+        ang_vel_penalty = ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt
+        # set angular velocity penalty to 0.0 as in the end, the drone should not be penilized for being unstable as it is not the main goal of the task
+        # ang_vel_penalty = 0.0
+
+
+        # --- GOAL APPROACH REWARD ---
+        distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
+        distance_reward = (1 - torch.tanh(distance_to_goal / 0.8)) * self.cfg.distance_to_goal_reward_scale 
+        # distance_reward = (1 - torch.tanh(distance_to_goal / 0.8)) * self.cfg.distance_to_goal_reward_scale * self.step_dt
+        # Encourages the drone to get closer to the end effector
+
+        # --- LANDING INCENTIVES ---
         is_close = distance_to_goal < 0.3
         is_slow = lin_vel < 0.1
-        smooth_landing = (is_close & is_slow).float() 
-        # --- Bonus for being very close to the target ---
-        proximity = (distance_to_goal < 0.1).float() 
+        smooth_landing_bonus = (is_close & is_slow).float() * self.cfg.smooth_landing_bonus
+        # Reward for being close AND slow: encourages gentle and precise landings
 
-        # --- Time-based shaping (inverse of time taken) ---
-        time_shaping = (1.0 - (self.episode_length_buf / self.max_episode_length)) 
+        proximity_bonus = (distance_to_goal < 0.1).float() * self.cfg.proximity_bonus
+        # Extra reward when the drone is very close: sharpens precision
 
-        # --- Orientation reward: keep UR10 ee_link pointing up ---
-        # UR10 X-axis should align with world Z-axis [0, 0, 1]
-        # Assuming ee_link's orientation is available in quaternion
-        ee_quat = self._Ur10Arm.data.body_quat_w[:, self._Ur10Arm.find_bodies("ee_link")[0], :]  # [N, 4]
+        # --- TIME SHAPING REWARD ---
+        time_shaping_reward = (self.episode_length_buf / self.max_episode_length)  # penalize time
+        # Encourages faster completion
+        # time_shaping_reward = (1.0 - self.episode_length_buf / self.max_episode_length) * self.cfg.time_bonus_scale
         
+
+        ee_quat = self._Ur10Arm.data.body_quat_w[:, self._Ur10Arm.find_bodies("ee_link")[0], :]  # [N, 4]
         # Try all three local axes to see which one we actually want pointing up
         local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
         local_y = torch.tensor([0, 1, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
@@ -336,61 +330,73 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         
         # Store these for debug visualization
         self._ee_local_axes_in_world = [world_x, world_y, world_z]
-        
-        # Use X-axis for alignment as that seems to be the one that should point upward
-        up_vector = world_x
-        
-        # Measure alignment with world Z [0,0,1] - this gives a value between -1 and 1
-        z_alignment = up_vector[:, 2]
-        
-        # Reward positive alignment AND penalize negative alignment
-        # When alignment is positive (pointing up): reward proportionally
-        # When alignment is negative (pointing down): penalize proportionally
-        orientation_reward = z_alignment * self.cfg.orientation_reward_scale
-        
-        # Log the actual alignment values for debugging
-        self._ee_alignment = z_alignment
 
+        # --- UR10 ORIENTATION REWARD ---
+        ee_quat = self._Ur10Arm.data.body_quat_w[:, self._Ur10Arm.find_bodies("ee_link")[0], :]
+        local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
+        world_x = quat_apply(ee_quat, local_x)
+        z_alignment = world_x[:, 2]  # Should point up (+Z)
+        orientation_reward = z_alignment * self.cfg.orientation_reward_scale * self.step_dt
+        # Encourages the UR10’s end effector to face upwards (stable base for landing)
+
+        # --- Drone Died Condition ---
+        died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0) # lower than 0.1 or higher than 4.0
+        # Penalize if the drone is dead
+        died_penalty = died.float() * self.cfg.died_penalty 
+
+
+        # --- FINAL REWARD AGGREGATION ---
         rewards = {
-            "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
-            "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
-            "smooth_landing": smooth_landing * self.cfg.smooth_landing_bonus * self.step_dt,
-            "proximity": proximity * self.cfg.proximity_bonus * self.step_dt,
-            "time_shaping": time_shaping * self.cfg.time_bonus_scale * self.step_dt,
-            "orientation_reward": orientation_reward * self.step_dt,
+            "lin_vel_penalty": lin_vel_penalty,
+            "ang_vel_penalty": ang_vel_penalty,
+            "distance_reward": distance_reward,
+            "smooth_landing_bonus": smooth_landing_bonus,
+            "proximity_bonus": proximity_bonus,
+            "time_shaping_reward": time_shaping_reward,
+            "orientation_reward": orientation_reward,
+            "died_penalty": died_penalty,
         }
-        drone_total_reward = (
-            rewards["lin_vel"] +
-            rewards["ang_vel"] +
-            rewards["distance_to_goal"] +
-            rewards["smooth_landing"] +
-            rewards["proximity"] +
-            rewards["time_shaping"] 
-        )
-        ur10_reward = (
-            rewards["orientation_reward"] + 
-            rewards["smooth_landing"] +
-            rewards["proximity"] +
-            rewards["distance_to_goal"]     
-        ) * self.step_dt
 
-        # Logging
+        # Drone reward: prioritize approach, smooth landing, and stability
+        drone_total_reward = (
+            distance_reward +
+            smooth_landing_bonus +
+            proximity_bonus +
+            time_shaping_reward +
+            lin_vel_penalty +
+            ang_vel_penalty +
+            died_penalty 
+        )
+
+        # UR10 reward: prioritize orientation and helping the drone land smoothly
+        ur10_reward = (
+            orientation_reward +
+            smooth_landing_bonus +
+            proximity_bonus +
+            distance_reward
+        )
+
+
+        # Logging episode sums for diagnostics
         for key, value in rewards.items():
             self._episode_sums[key] += value
 
+        if torch.any(torch.isnan(distance_to_goal)):
+            print("[DEBUG] distance_to_goal has NaNs!")
+
+        if torch.rand(1).item() < 0.1:
+            print(f"[DEBUG] dist: {distance_to_goal.mean():.3f}, vel: {lin_vel.mean():.3f}, ang_vel: {ang_vel.mean():.3f}")
+            print(f"[DEBUG] drone Z: {self._DroneRobot.data.root_pos_w[:, 2].mean():.3f}")
+
         return {"_Ur10Arm": ur10_reward, "_DroneRobot": drone_total_reward}
 
-    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0)
-<<<<<<< HEAD
-        return died, time_out
-=======
-
+        died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0) # lower than 0.1 or higher than 4.0
+    
         terminated = {
             "_DroneRobot": died,
-            "_Ur10Arm": died,  # or a custom condition for the UR10 if needed
+            "_Ur10Arm": died,  
         }
         time_outs = {
             "_DroneRobot": time_out,
@@ -398,8 +404,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         }
 
         return terminated, time_outs
->>>>>>> parent of 3602070e1 (Updates)
-
 
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
@@ -407,8 +411,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         # Reset the articulation and rigid body attributes
         super()._reset_idx(env_ids)
-        
-
+    
         # Logging
         final_distance_to_goal = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self._DroneRobot.data.root_pos_w[env_ids], dim=1
@@ -421,8 +424,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
         extras = dict()
-        # extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
-        # extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
         self.extras["log"].update(extras)
 
@@ -501,7 +502,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     def _debug_vis_callback(self, event):
         # update the markers
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
-        
         # Update end effector frame marker
         if hasattr(self, "ee_frame_visualizer"):
             ee_indices = self._Ur10Arm.find_bodies("ee_link")
@@ -509,15 +509,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                 ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
                 ee_quat = self._Ur10Arm.data.body_quat_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
                 self.ee_frame_visualizer.visualize(ee_pos, ee_quat)
-                
-                # Print alignment value for debugging
-                # if hasattr(self, "_ee_alignment"):
-                #     alignment = self._ee_alignment[0].item()  # Get the first environment's alignment
-                #     # Only print every 100 steps to avoid flooding the console
-                #     if self.step_count % 100 == 0:
-                #         print(f"EE alignment with world up: {alignment:.4f} - " +
-                #               f"{'GOOD (pointing up)' if alignment > 0.7 else 'POOR (not pointing up)'}")
-
+            
 @torch.jit.script
 def scale(x, lower, upper):
     return 0.5 * (x + 1.0) * (upper - lower) + lower
@@ -540,38 +532,3 @@ def randomize_rotation(rand0, rand1, x_unit_tensor, y_unit_tensor):
 @torch.jit.script
 def normalize_angle(angle):
     return (angle + math.pi) % (2 * math.pi) - math.pi
-
-
-@torch.jit.script
-def compute_rewards(
-    rew_scale_alive: float,
-    rew_scale_terminated: float,
-    rew_scale_cart_pos: float,
-    rew_scale_cart_vel: float,
-    rew_scale_pole_pos: float,
-    rew_scale_pole_vel: float,
-    rew_scale_pendulum_pos: float,
-    rew_scale_pendulum_vel: float,
-    cart_pos: torch.Tensor,
-    cart_vel: torch.Tensor,
-    pole_pos: torch.Tensor,
-    pole_vel: torch.Tensor,
-    pendulum_pos: torch.Tensor,
-    pendulum_vel: torch.Tensor,
-    reset_terminated: torch.Tensor,
-):
-    rew_alive = rew_scale_alive * (1.0 - reset_terminated.float())
-    rew_termination = rew_scale_terminated * reset_terminated.float()
-    rew_pole_pos = rew_scale_pole_pos * torch.sum(torch.square(pole_pos).unsqueeze(dim=1), dim=-1)
-    rew_pendulum_pos = rew_scale_pendulum_pos * torch.sum(
-        torch.square(pole_pos + pendulum_pos).unsqueeze(dim=1), dim=-1
-    )
-    rew_cart_vel = rew_scale_cart_vel * torch.sum(torch.abs(cart_vel).unsqueeze(dim=1), dim=-1)
-    rew_pole_vel = rew_scale_pole_vel * torch.sum(torch.abs(pole_vel).unsqueeze(dim=1), dim=-1)
-    rew_pendulum_vel = rew_scale_pendulum_vel * torch.sum(torch.abs(pendulum_vel).unsqueeze(dim=1), dim=-1)
-
-    total_reward = {
-        "cart": rew_alive + rew_termination + rew_pole_pos + rew_cart_vel + rew_pole_vel,
-        "pendulum": rew_alive + rew_termination + rew_pendulum_pos + rew_pendulum_vel,
-    }
-    return total_reward

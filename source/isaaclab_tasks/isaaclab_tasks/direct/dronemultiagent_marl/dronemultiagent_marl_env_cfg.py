@@ -24,18 +24,17 @@ from isaaclab.utils import configclass
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
-#test
 @configclass
 class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # env
     decimation = 2
-    episode_length_s = 4.0
+    episode_length_s = 6.0
 
     # multi-agent specification and spaces definition
     possible_agents = ["_DroneRobot", "_Ur10Arm"]
     action_spaces = {"_DroneRobot": 4, "_Ur10Arm": 6}
     observation_spaces = {"_DroneRobot": 20, "_Ur10Arm": 34}
-    state_space = 51  # sum of global state dims (12+12) # I don't know what this should be set to yet for the MAPPO implementation
+    state_space = 51  # sum of global state dims
     debug_vis = True    
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -124,16 +123,17 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     act_moving_average = 1.0
     
     # reward scales
-    lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
+    lin_vel_reward_scale = -0.5           # Penalize high linear velocity (drone)
     ang_vel_reward_scale = -0.01           # Penalize angular velocity (drone)
-    distance_to_goal_reward_scale = 15.0   # Reward approaching robot EE
-    smooth_landing_bonus = 10.0            # Bonus when drone is both slow and close
-    proximity_bonus = 25.0                 # Bonus when drone is very close
+    distance_to_goal_reward_scale = 100.0   # Reward approaching robot EE
+    smooth_landing_bonus = 25.0            # Bonus when drone is both slow and close
+    proximity_bonus = 125.0                 # Bonus when drone is very close
     time_bonus_scale = 1.0                 # Encourage early task completion
-    orientation_reward_scale = 15.0        # Encourage robot EE to face upwards
+    orientation_reward_scale = 125.0        # Encourage robot EE to face upwards
         #25 was a bit too much and it was making the arm focus too much on the oritentation of the end effector rather than the drone landing close to the arm :D
 
     # punishments
     unstable_penalty = -2.0                # Penalty when drone is unstable
     time_penalty = -0.01                   # Per-step penalty to encourage speed
-    angular_vel_threshold = 0.5            # Threshold for defining "unstable"
+    angular_vel_threshold = 0.75            # Threshold for defining "unstable"
+    died_penalty = -100.0                 # Penalty for going out of bounds
