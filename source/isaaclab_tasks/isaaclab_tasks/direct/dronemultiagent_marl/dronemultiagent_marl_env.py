@@ -54,7 +54,20 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         # === Goal setup (optional, based on your reward function) ===
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
-        self.goal_pos[:] = torch.tensor([0.0, 0.0, 1.0], device=self.device)  # Example: 1m above base
+
+        # Base local goal position
+        base_local_goal = torch.tensor([1.0, -1.0, 1.0], device=self.device)  # (3,)
+
+        # Add randomness per environment (e.g., ±0.2 meters)
+        random_offset = torch.empty((self.num_envs, 3), device=self.device).uniform_(-0.4, 0.4)
+
+        # Compute world-space goal per environment
+        goal_pos_w = self._terrain.env_origins + base_local_goal + random_offset  # (num_envs, 3)
+
+        # Assign goal positions
+        self.goal_pos[:] = goal_pos_w
+
+
 
         # Marker for visualization
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
@@ -95,7 +108,13 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         # Use live UR10 end-effector position as drone's target
         ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 1, 3]
-        self._desired_pos_w = ee_pos.squeeze(1)  # Save as [num_envs, 3]
+        #self._desired_pos_w = ee_pos.squeeze(1)  # Save as [num_envs, 3]
+
+        # Try a fixed position for the goal 
+        self._desired_pos_w = self.goal_pos
+
+
+        
         if torch.rand(1).item() < 0.01:
             print(f"[DEBUG] desired_pos_w avg Z: {self._desired_pos_w[:, 2].mean():.3f}")
 
@@ -144,7 +163,10 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         
         # Always fetch the current ee_link position each step
         ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 3]
-        self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
+
+        # Try a fixed position for the goal 
+        self._desired_pos_w = self.goal_pos
+        # self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
 
     def _apply_action(self) -> None:
         # === Drone ===
@@ -287,11 +309,29 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # --- DRONE STABILITY PENALTIES ---
         # Penalize linear velocity to encourage gentle landings
         lin_vel = torch.sum(torch.square(self._DroneRobot.data.root_lin_vel_b), dim=1)
-        lin_vel_penalty = lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt
 
-        # Penalize angular velocity to encourage upright and stable orientation
+        if (lin_vel > 10).any():
+            lin_vel_penalty = lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt
+        else:
+            lin_vel_penalty = 0.0
+            print(f"[DEBUG] NO lin_vel_penalty as speed is low enough {lin_vel_penalty}")
+        
+
+        #Use the angular_vel_threshold to determine if the drone surpasses the threshold if thats the case then we apply the penalty
+        
         ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
-        ang_vel_penalty = ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt
+        if (ang_vel > self.cfg.angular_vel_threshold).any():
+            ang_vel_penalty = ang_vel * self.cfg.ang_vel_reward_scale
+        else:
+            ang_vel_penalty =10 
+            print(f"[DEBUG] positive ang_vel_penalty: {ang_vel_penalty}")
+
+        # ang_vel_penalty = torch.where(ang_vel > self.cfg.angular_vel_threshold, ang_vel * self.cfg.ang_vel_reward_scale, torch.zeros_like(ang_vel))
+        # Add a debug print statement to check the values of ang_vel and ang_vel_penalty and if the penalty is being applied correctly
+        print(f"[DEBUG] angular_vel: {ang_vel.mean():.3f}")
+
+        # ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
+        # ang_vel_penalty = ang_vel * self.cfg.ang_vel_reward_scale 
         # set angular velocity penalty to 0.0 as in the end, the drone should not be penilized for being unstable as it is not the main goal of the task
         # ang_vel_penalty = 0.0
 
@@ -304,7 +344,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         # --- LANDING INCENTIVES ---
         is_close = distance_to_goal < 0.3
-        is_slow = lin_vel < 0.1
+        is_slow = lin_vel < 10
         smooth_landing_bonus = (is_close & is_slow).float() * self.cfg.smooth_landing_bonus
         # Reward for being close AND slow: encourages gentle and precise landings
 
@@ -334,13 +374,28 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # --- UR10 ORIENTATION REWARD ---
         ee_quat = self._Ur10Arm.data.body_quat_w[:, self._Ur10Arm.find_bodies("ee_link")[0], :]
         local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
-        world_x = quat_apply(ee_quat, local_x)
+        # world_x = quat_apply(ee_quat, local_x)
+        world_x = quat_apply(ee_quat, local_z)
+
         z_alignment = world_x[:, 2]  # Should point up (+Z)
         orientation_reward = z_alignment * self.cfg.orientation_reward_scale * self.step_dt
         # Encourages the UR10’s end effector to face upwards (stable base for landing)
 
-        # --- Drone Died Condition ---
-        died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0) # lower than 0.1 or higher than 4.0
+
+        # Get drone positions and environment origins
+        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+        env_origins = self._terrain.env_origins  # shape: (num_envs, 3)
+
+        # Compute position relative to the environment origin
+        local_pos = drone_pos - env_origins  # (num_envs, 3)
+
+        # Apply local box bounds (e.g., within [-2, 2] in x and y)
+        x_out_of_bounds = torch.logical_or(local_pos[:, 0] < -2.0, local_pos[:, 0] > 2.0)
+        y_out_of_bounds = torch.logical_or(local_pos[:, 1] < -2.0, local_pos[:, 1] > 2.0)
+        died_sideways = torch.logical_or(x_out_of_bounds, y_out_of_bounds)
+        z_out_of_bounds = torch.logical_or(drone_pos[:, 2] < 0.1, drone_pos[:, 2] > 2.0)
+        died = torch.logical_or(z_out_of_bounds, died_sideways)
+
         # Penalize if the drone is dead
         died_penalty = died.float() * self.cfg.died_penalty 
 
@@ -392,11 +447,24 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
     def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        died = torch.logical_or(self._DroneRobot.data.root_pos_w[:, 2] < 0.1, self._DroneRobot.data.root_pos_w[:, 2] > 2.0) # lower than 0.1 or higher than 4.0
-    
+        # Get drone positions and environment origins
+        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+        env_origins = self._terrain.env_origins  # shape: (num_envs, 3)
+
+        # Compute position relative to the environment origin
+        local_pos = drone_pos - env_origins  # (num_envs, 3)
+
+        # Apply local box bounds (e.g., within [-2, 2] in x and y)
+        x_out_of_bounds = torch.logical_or(local_pos[:, 0] < -2.0, local_pos[:, 0] > 2.0)
+        y_out_of_bounds = torch.logical_or(local_pos[:, 1] < -2.0, local_pos[:, 1] > 2.0)
+        died_sideways = torch.logical_or(x_out_of_bounds, y_out_of_bounds)
+        z_out_of_bounds = torch.logical_or(drone_pos[:, 2] < 0.1, drone_pos[:, 2] > 2.0)
+        died = torch.logical_or(z_out_of_bounds, died_sideways)
+
+
         terminated = {
             "_DroneRobot": died,
-            "_Ur10Arm": died,  
+            "_Ur10Arm": died,
         }
         time_outs = {
             "_DroneRobot": time_out,
@@ -408,6 +476,13 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     def _reset_idx(self, env_ids: torch.Tensor | None):
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._DroneRobot._ALL_INDICES
+
+         # === Randomize goal position for the selected envs ===
+        base_local_goal = torch.tensor([1.0, -1.0, 1.0], device=self.device)  # (3,)
+        random_offset = torch.empty((len(env_ids), 3), device=self.device).uniform_(-0.4, 0.4)
+        goal_pos_w = self._terrain.env_origins[env_ids] + base_local_goal + random_offset
+        self.goal_pos[env_ids] = goal_pos_w
+        self._desired_pos_w[env_ids] = goal_pos_w  # if you're using this elsewhere in reward computation
 
         # Reset the articulation and rigid body attributes
         super()._reset_idx(env_ids)
@@ -461,10 +536,10 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._Ur10Arm.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._Ur10Arm.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-
-        obs = self._get_observations()
-        print(f"[RESET DEBUG] DroneRobot observation shape: {obs['_DroneRobot'].shape}")
-        print(f"[RESET DEBUG] UR10 Arm observation shape: {obs['_Ur10Arm'].shape}")
+    
+        #obs = self._get_observations()
+        # print(f"[RESET DEBUG] DroneRobot observation shape: {obs['_DroneRobot'].shape}")
+        # print(f"[RESET DEBUG] UR10 Arm observation shape: {obs['_Ur10Arm'].shape}")
 
     def _set_debug_vis_impl(self, debug_vis: bool):
             # create markers if necessary for the first tome

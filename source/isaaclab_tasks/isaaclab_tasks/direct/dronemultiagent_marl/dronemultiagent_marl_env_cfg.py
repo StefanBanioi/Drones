@@ -123,17 +123,17 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     act_moving_average = 1.0
     
     # reward scales
-    lin_vel_reward_scale = -0.5           # Penalize high linear velocity (drone)
-    ang_vel_reward_scale = -0.01           # Penalize angular velocity (drone)
+    lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
+    ang_vel_reward_scale = -0.10           # Penalize angular velocity (drone)
     distance_to_goal_reward_scale = 100.0   # Reward approaching robot EE
-    smooth_landing_bonus = 25.0            # Bonus when drone is both slow and close
+    smooth_landing_bonus = 325.0            # Bonus when drone is both slow and close
     proximity_bonus = 125.0                 # Bonus when drone is very close
     time_bonus_scale = 1.0                 # Encourage early task completion
-    orientation_reward_scale = 125.0        # Encourage robot EE to face upwards
+    orientation_reward_scale = 225.0        # Encourage robot EE to face upwards
         #25 was a bit too much and it was making the arm focus too much on the oritentation of the end effector rather than the drone landing close to the arm :D
 
     # punishments
     unstable_penalty = -2.0                # Penalty when drone is unstable
     time_penalty = -0.01                   # Per-step penalty to encourage speed
-    angular_vel_threshold = 0.75            # Threshold for defining "unstable"
-    died_penalty = -100.0                 # Penalty for going out of bounds
+    angular_vel_threshold = 55            # Threshold for defining "unstable"
+    died_penalty = -1000.0                 # Penalty for going out of bounds
