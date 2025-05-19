@@ -41,6 +41,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self._desired_pos_w = torch.zeros(self.num_envs, 3, device=self.device)
 
         # Logging
+
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
@@ -58,9 +59,12 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 "wrist_height_reward",
             ]
         }
+
+
         # Get specific body indices
         self._body_id = self._DroneRobot.find_bodies("body")[0]
-        self._robot_mass = self._DroneRobot.root_physx_view.get_masses()[0].sum()
+        #self._robot_mass = self._DroneRobot.root_physx_view.get_masses()[0].sum()
+        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum())   # scale to 3x size (volume scales with the cube of length)
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
@@ -178,7 +182,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
 
         # --- Smooth landing reward (close + slow) ---
-        is_close = distance_to_goal < 0.15
+        is_close = distance_to_goal < 0.05
         is_slow = lin_vel < 10
         smooth_landing = (is_close & is_slow).float() 
         # --- Bonus for being very close to the target ---
@@ -307,7 +311,6 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             self._episode_sums[key] += value
 
         return reward
-
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         time_out = self.episode_length_buf >= self.max_episode_length - 1
@@ -451,9 +454,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 self.ee_frame_visualizer.visualize(ee_pos, ee_quat)
                 
                 #Print alignment value for debugging
-                if hasattr(self, "_ee_alignment"):
-                    alignment = self._ee_alignment[0].item()  # Get the first environment's alignment
-                    # Only print every 100 steps to avoid flooding the console
+                # if hasattr(self, "_ee_alignment"):
+                #     alignment = self._ee_alignment[0].item()  # Get the first environment's alignment
+                #     # Only print every 100 steps to avoid flooding the console
                     # if self.step_count % 100 == 0:
                     #     print(f"EE alignment with world up: {alignment:.4f} - " +
                     #           f"{'GOOD (pointing up)' if alignment > 0.7 else 'POOR (not pointing up)'}")

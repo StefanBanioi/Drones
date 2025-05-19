@@ -79,17 +79,19 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                 "lin_vel_penalty",
                 "ang_vel_penalty",
                 "distance_reward",
+                "distance_reward_ur10",
                 "smooth_landing_bonus",
                 "proximity_bonus",
                 "time_shaping_reward",
                 "orientation_reward",
                 "died_penalty",
+                "wrist_height_reward", 
             ]
         }
 
         # Get specific body indices
         self._body_id = self._DroneRobot.find_bodies("body")[0]
-        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum()) *27.0 # scale to 3x size (volume scales with the cube of length)
+        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum())  # scale to 3x size (volume scales with the cube of length)
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
@@ -108,10 +110,10 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         # Use live UR10 end-effector position as drone's target
         ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 1, 3]
-        #self._desired_pos_w = ee_pos.squeeze(1)  # Save as [num_envs, 3]
+        self._desired_pos_w = ee_pos.squeeze(1)  # Save as [num_envs, 3]
 
         # Try a fixed position for the goal 
-        self._desired_pos_w = self.goal_pos
+        #self._desired_pos_w = self.goal_pos
 
 
         
@@ -165,8 +167,8 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 3]
 
         # Try a fixed position for the goal 
-        self._desired_pos_w = self.goal_pos
-        # self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
+        #self._desired_pos_w = self.goal_pos
+        self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
 
     def _apply_action(self) -> None:
         # === Drone ===
@@ -246,6 +248,17 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
         observations = {
+
+            # === UR10 Arm Observations ===
+            # Joint positions (scaled)
+            # Joint velocities (scaled)
+            # End-effector position (world space)
+            # End-effector orientation (world space)
+            # End-effector linear velocity (world space)
+            # End-effector angular velocity (world space)
+            # Previous actions
+            # Drone position (world space)
+            
             "_Ur10Arm": torch.cat(
                 (
                     unscale(self._Ur10Arm.data.joint_pos, self.arm_dof_lower_limits, self.arm_dof_upper_limits),
@@ -256,8 +269,9 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                     self.ee_ang_vel,
                     self.actions["_Ur10Arm"],
                     
-                    # put this to _desired_pos_w as this is the ee_pos
-                    self._desired_pos_w, 
+                    #self._desired_pos_w, 
+                    # Probably also add the position of the drone as well
+                    self._DroneRobot.data.root_pos_w,
                 ),
                 dim=-1,
             ),
@@ -310,7 +324,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # Penalize linear velocity to encourage gentle landings
         lin_vel = torch.sum(torch.square(self._DroneRobot.data.root_lin_vel_b), dim=1)
 
-        if (lin_vel > 10).any():
+        if (lin_vel > 20).any():
             lin_vel_penalty = lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt
         else:
             lin_vel_penalty = 0.0
@@ -336,11 +350,15 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # ang_vel_penalty = 0.0
 
 
-        # --- GOAL APPROACH REWARD ---
+        # --- GOAL APPROACH REWARD FROM DRONE POV ---
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
         distance_reward = (1 - torch.tanh(distance_to_goal / 0.8)) * self.cfg.distance_to_goal_reward_scale 
         # distance_reward = (1 - torch.tanh(distance_to_goal / 0.8)) * self.cfg.distance_to_goal_reward_scale * self.step_dt
         # Encourages the drone to get closer to the end effector
+
+        # --- GOAL APPROACH REWARD FROM UR10 POV --- (Distance from end effector to Drone Position)
+        distance_to_goal_ur10 = torch.linalg.norm(self._DroneRobot.data.root_pos_w - self._desired_pos_w, dim=1,) 
+        distance_reward_ur10 = (1 - torch.tanh(distance_to_goal_ur10 / 0.8)) * self.cfg.distance_to_goal_reward_scale
 
         # --- LANDING INCENTIVES ---
         is_close = distance_to_goal < 0.3
@@ -399,17 +417,48 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # Penalize if the drone is dead
         died_penalty = died.float() * self.cfg.died_penalty 
 
+                # === Wrist joint elevation reward ===
+        z_threshold = 0.7  # Minimum height in world Z
+
+        # Get Z positions of the wrist links
+        wrist_1_z = self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies("wrist_1_link")[0], 2]
+        wrist_2_z = self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies("wrist_2_link")[0], 2]
+        wrist_3_z = self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies("wrist_3_link")[0], 2]
+
+        # Check if each wrist is above the threshold
+        wrist_1_above = (wrist_1_z > z_threshold).float()
+        wrist_2_above = (wrist_2_z > z_threshold).float()
+        wrist_3_above = (wrist_3_z > z_threshold).float()
+
+        # Compute the average score
+        wrist_height_score = (wrist_1_above + wrist_2_above + wrist_3_above) / 3.0
+
+        # Count how many wrists are above/below threshold
+        wrist_above = (wrist_1_z > z_threshold).float() + (wrist_2_z > z_threshold).float() + (wrist_3_z > z_threshold).float()
+        wrist_below = 3.0 - wrist_above  # max is 3
+
+        # Reward for each wrist above, penalty for each wrist below
+        wrist_reward = (
+            wrist_above * self.cfg.wrist_height_reward_scale
+            - wrist_below * self.cfg.wrist_height_penalty_scale
+        ) * self.step_dt
+
+        # Scale the reward
+        wrist_reward = (wrist_height_score * self.cfg.wrist_height_reward_scale * self.step_dt).squeeze(-1)
+
 
         # --- FINAL REWARD AGGREGATION ---
         rewards = {
             "lin_vel_penalty": lin_vel_penalty,
             "ang_vel_penalty": ang_vel_penalty,
             "distance_reward": distance_reward,
+            "distance_reward_ur10": distance_reward_ur10,
             "smooth_landing_bonus": smooth_landing_bonus,
             "proximity_bonus": proximity_bonus,
             "time_shaping_reward": time_shaping_reward,
             "orientation_reward": orientation_reward,
             "died_penalty": died_penalty,
+            "wrist_height_reward": wrist_reward   
         }
 
         # Drone reward: prioritize approach, smooth landing, and stability
@@ -426,9 +475,9 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # UR10 reward: prioritize orientation and helping the drone land smoothly
         ur10_reward = (
             orientation_reward +
-            smooth_landing_bonus +
-            proximity_bonus +
-            distance_reward
+            distance_reward +
+            wrist_reward + 
+            distance_reward_ur10 
         )
 
 
@@ -458,7 +507,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         x_out_of_bounds = torch.logical_or(local_pos[:, 0] < -2.0, local_pos[:, 0] > 2.0)
         y_out_of_bounds = torch.logical_or(local_pos[:, 1] < -2.0, local_pos[:, 1] > 2.0)
         died_sideways = torch.logical_or(x_out_of_bounds, y_out_of_bounds)
-        z_out_of_bounds = torch.logical_or(drone_pos[:, 2] < 0.1, drone_pos[:, 2] > 2.0)
+        z_out_of_bounds = torch.logical_or(drone_pos[:, 2] < 0.3, drone_pos[:, 2] > 2.0)
         died = torch.logical_or(z_out_of_bounds, died_sideways)
 
 

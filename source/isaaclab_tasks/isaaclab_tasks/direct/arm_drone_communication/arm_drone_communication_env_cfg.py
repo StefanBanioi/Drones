@@ -64,8 +64,8 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
     # robotDrone
     robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    thrust_to_weight = 1.9
-    moment_scale = 0.01
+    thrust_to_weight = 1.9 
+    moment_scale = 0.01  #3.0 # scale the moment of inertia
 
     UR10_CFG = ArticulationCfg(
         prim_path="/World/envs/env_.*/UR10",
@@ -101,6 +101,15 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
 
     # reward scales
+
+    # distance_to_goal_reward_scale = 1   # Reward approaching robot EE
+    # smooth_landing_bonus = 1            # Bonus when drone is both slow and close
+    # ee_height_bonus = 0.5      
+    # alive_bonus =1   
+    # died_penalty = -2               # Penalty for going out of bounds
+    # lin_vel_reward_scale = -0.01           # Penalize high linear velocity (drone)
+    # orientation_reward_scale = 1        # Encourage robot EE to face upwards
+
 
     distance_to_goal_reward_scale = 125.0   # Reward approaching robot EE
     smooth_landing_bonus = 180.0            # Bonus when drone is both slow and close
