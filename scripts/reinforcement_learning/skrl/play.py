@@ -13,6 +13,8 @@ a more user-friendly way.
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+from torch.utils.tensorboard.writer import SummaryWriter
+
 
 from isaaclab.app import AppLauncher
 
@@ -116,6 +118,18 @@ def main():
     log_root_path = os.path.join("logs", "skrl", experiment_cfg["agent"]["experiment"]["directory"])
     log_root_path = os.path.abspath(log_root_path)
     print(f"[INFO] Loading experiment from directory: {log_root_path}")
+
+    # Added code 21/05/2025
+    # Setup TensorBoard writer for play logs
+    # Setup TensorBoard writer for play logs
+    play_log_dir = os.path.join(log_root_path, "play_logs")
+    writer = SummaryWriter(log_dir=play_log_dir)
+    print(f"[INFO] Logging play metrics to: {play_log_dir}")
+
+
+
+
+
     # get checkpoint path
     if args_cli.use_pretrained_checkpoint:
         resume_path = get_published_pretrained_checkpoint("skrl", args_cli.task)
@@ -137,11 +151,11 @@ def main():
     if isinstance(env.unwrapped, DirectMARLEnv) and algorithm in ["ppo"]:
         env = multi_agent_to_single_agent(env)
 
-    # get environment (physics) dt for real-time evaluation
+    # get environment (step) dt for real-time evaluation
     try:
-        dt = env.physics_dt
+        dt = env.step_dt
     except AttributeError:
-        dt = env.unwrapped.physics_dt
+        dt = env.unwrapped.step_dt
 
     # wrap for video recording
     if args_cli.video:
@@ -173,6 +187,9 @@ def main():
     # reset environment
     obs, _ = env.reset()
     timestep = 0
+    total_success = 0
+    total_crash = 0
+    total_timeout = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -189,6 +206,32 @@ def main():
                 actions = outputs[-1].get("mean_actions", outputs[0])
             # env stepping
             obs, _, _, _, _ = env.step(actions)
+
+        # Read logging metrics from env.extras only when reset occurs
+        if "log" in getattr(env.unwrapped, "extras", {}):
+            log_data = env.unwrapped.extras["log"]
+            
+            # Current success, crash, and timout
+            # Note: The log data is reset after each episode, so we need to accumulate the values
+            current_success = log_data.get("Episode_Success/success", 0)
+
+            current_crash = log_data.get("Episode_Success/crash", 0)
+
+            current_timeout = log_data.get("Episode_Success/timeout", 0)
+
+            total_success += current_success
+            total_crash += current_crash
+            total_timeout += current_timeout
+
+            # Log the current success, crash, and timeout   
+            if timestep % 20 == 0:
+                writer.add_scalar("Play_Cumulative/success", total_success, timestep)
+                writer.add_scalar("Play_Cumulative/crash", total_crash, timestep)
+                writer.add_scalar("Play_Cumulative/timeout", total_timeout, timestep)
+
+            # Clear extras to avoid double-counting
+            env.unwrapped.extras["log"] = {}
+
         if args_cli.video:
             timestep += 1
             # exit the play loop after recording one video
@@ -199,6 +242,17 @@ def main():
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    # Final metrics summary
+    writer.add_scalar("Play_Final/total_success", total_success)
+    writer.add_scalar("Play_Final/total_crash", total_crash)
+    writer.add_scalar("Play_Final/total_timeout", total_timeout)
+    print(f"[INFO] Total Success: {total_success}")
+    print(f"[INFO] Total Crash: {total_crash}")
+    print(f"[INFO] Total Timeout: {total_timeout}")
+
+    # close the writer
+    writer.close()
 
     # close the simulator
     env.close()

@@ -33,6 +33,14 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
     def __init__(self, cfg: ArmDroneCommunicationEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
+        self._step_count = 0
+
+        # add a episode level success tracker 
+        self._episode_success_flags = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # add a episode level failure tracker
+        self._episode_failure_flags = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        
         # Total thrust and moment applied to the base of the quadcopter
         self._actions = torch.zeros(self.num_envs, gym.spaces.flatdim(self.single_action_space), device=self.device)
         self._thrust = torch.zeros(self.num_envs, 1, 3, device=self.device)
@@ -52,13 +60,17 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 "proximity",
                 "time_shaping",
                 "orientation_reward",
-
+                #"interception_reward",
+                
                 # === Added code today 15/05/2025 ===
                 "died_penalty",
                 # === End of added code ===
                 "wrist_height_reward",
             ]
         }
+        # Add after self._episode_sums
+        self._success_status = torch.zeros(self.num_envs, dtype=torch.int8, device=self.device)
+
 
 
         # Get specific body indices
@@ -112,6 +124,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone().clamp(-1.0, 1.0)
+        self._step_count += 1
 
         # Drone thrust and moment (new)
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
@@ -176,20 +189,48 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Velocity penalties/rewards — from the drone
         lin_vel = torch.sum(torch.square(self._DroneRobot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
+        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
         
         # Distance from drone to robot end-effector (goal)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
 
         # --- Smooth landing reward (close + slow) ---
-        is_close = distance_to_goal < 0.05
+        is_close = distance_to_goal < 0.15
         is_slow = lin_vel < 10
         smooth_landing = (is_close & is_slow).float() 
+
+        # --- Update the success status ---
+
+        # Track whether each env has met landing condition (but don't mark it as successful yet)
+        self._episode_success_flags |= (is_close & is_slow)
+
+
+
         # --- Bonus for being very close to the target ---
-        proximity = (distance_to_goal < 0.1).float() 
+        #proximity = (distance_to_goal < 0.1).float() 
+
+        # 
+        # Require that the drone is close AND moving faster than X m/s
+        proximity = ((distance_to_goal < 0.2) & (lin_vel > 4.0)).float()
+
 
         # --- Time-based shaping (inverse of time taken) ---
         time_shaping = (1.0 - (self.episode_length_buf / self.max_episode_length)) 
+
+        # # === Interception reward (encourages arm to move toward drone mid-air) ===
+        # ee_pos = self._finalUr10.data.body_pos_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 3]
+        # ee_vel = self._finalUr10.data.body_lin_vel_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 3]
+
+        # ee_to_drone = drone_pos - ee_pos  # [N, 3]
+        # ee_to_drone_unit = torch.nn.functional.normalize(ee_to_drone, dim=1)
+
+        # # Dot product → how much arm is moving toward the drone
+        # ee_speed_toward_drone = torch.sum(ee_vel * ee_to_drone_unit, dim=1).clamp(min=0.0)  # [N]
+
+        # interception_reward = ee_speed_toward_drone * self.cfg.interception_reward  # [N]
+
+
 
         # --- Orientation reward: keep UR10 ee_link pointing up ---
         # UR10 X-axis should align with world Z-axis [0, 0, 1]
@@ -220,6 +261,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         
         # Measure alignment with world Z [0,0,1] - this gives a value between -1 and 1
         z_alignment = up_vector[:, 2]
+  
+        # Log the actual alignment values for debugging
+        self._ee_alignment = z_alignment
         
         # Reward positive alignment AND penalize negative alignment
         # When alignment is positive (pointing up): reward proportionally
@@ -228,6 +272,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         
         # Log the actual alignment values for debugging
         self._ee_alignment = z_alignment
+
+
+        
+        
+
 
         # === Added code today 15/05/2025 ===
 
@@ -251,10 +300,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # === End of added code ===
 
         # === Added code today 15/05/2025 ===
-        if torch.rand(1).item() < 0.1:
+        if torch.rand(1).item() < 0.05:
             print(f"[DEBUG] dist: {distance_to_goal.mean():.3f}, vel: {lin_vel.mean():.3f}, ang_vel: {ang_vel.mean():.3f}")
             print(f"[DEBUG] drone Z: {self._DroneRobot.data.root_pos_w[:, 2].mean():.3f}")
             print(f"[DEBUG] ee_link Z: {self._finalUr10.data.body_pos_w[:, self._finalUr10.find_bodies('ee_link')[0], 2].mean():.3f}")
+            print(f"[DEBUG] Proximity-gated orientation reward mean: {orientation_reward.mean():.3f}")
         # === End of added code ===
 
         # === Wrist joint elevation reward ===
@@ -297,6 +347,8 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             "proximity": proximity * self.cfg.proximity_bonus * self.step_dt,
             "time_shaping": time_shaping * self.cfg.time_bonus_scale * self.step_dt,
             "orientation_reward": orientation_reward * self.step_dt,
+            #"interception_reward": interception_reward * self.step_dt,
+
 
             # === Added code today 15/05/2025 ===
             "died_penalty": died_penalty ,
@@ -327,8 +379,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         x_out_of_bounds = torch.logical_or(local_pos[:, 0] < -2.5, local_pos[:, 0] > 2.5)
         y_out_of_bounds = torch.logical_or(local_pos[:, 1] < -2.5, local_pos[:, 1] > 2.5)
         died_sideways = torch.logical_or(x_out_of_bounds, y_out_of_bounds)
-        z_out_of_bounds = torch.logical_or(drone_pos[:, 2] < 0.1, drone_pos[:, 2] > 4.0)
+        z_out_of_bounds = torch.logical_or(drone_pos[:, 2] < 0.3, drone_pos[:, 2] > 4.0)
         died = torch.logical_or(z_out_of_bounds, died_sideways)
+
         # === End of added code ===
 
         # Comment this out if you want to use the new died condition
@@ -365,6 +418,39 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
         extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
         self.extras["log"].update(extras)
+
+        # === Finalize episode outcome at reset ===
+        # Reset status for selected envs
+        self._success_status[env_ids] = 0
+
+        # Mark environments that successfully landed during the episode
+        success_env_ids = env_ids[self._episode_success_flags[env_ids]]
+        self._success_status[success_env_ids] = 1
+
+        # Crashed environments (terminated)
+        crash_env_ids = env_ids[self.reset_terminated[env_ids]]
+        self._success_status[crash_env_ids] = -1
+
+        # Timed out environments that never landed = failure (-2)
+        timeout_env_ids = env_ids[self.reset_time_outs[env_ids]]
+        timeout_failed_env_ids = timeout_env_ids[~self._episode_success_flags[timeout_env_ids]]
+        self._success_status[timeout_failed_env_ids] = -2
+
+        # Reset the flags so next episode can track success again
+        self._episode_success_flags[env_ids] = False
+
+
+        # === Log total success/failure counts ===
+        success_count = torch.sum(self._success_status[env_ids] == 1).item()
+        crash_count = torch.sum(self._success_status[env_ids] == -1).item()
+        timeout_count = torch.sum(self._success_status[env_ids] == -2).item()
+
+        self.extras["log"]["Episode_Success/success"] = success_count
+        self.extras["log"]["Episode_Success/crash"] = crash_count
+        self.extras["log"]["Episode_Success/timeout"] = timeout_count
+
+
+        
 
         # Reset the robotDrone 
         self._DroneRobot.reset(env_ids)
@@ -408,6 +494,8 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self._finalUr10.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._finalUr10.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
+
+
     def _set_debug_vis_impl(self, debug_vis: bool):
             # create markers if necessary for the first tome
             if debug_vis:
@@ -444,6 +532,15 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
     def _debug_vis_callback(self, event):
         # update the markers
         self.goal_pos_visualizer.visualize(self._desired_pos_w)
+
+        # === Visualize Success/Failure ===
+        status = self._success_status.cpu().numpy()
+        success_count = (status == 1).sum()
+        failure_count = (status == -1).sum()
+        print(f"[STEP {self._step_count}] Success: {success_count} | Failure: {failure_count}")
+
+
+
         
         # Update end effector frame marker
         if hasattr(self, "ee_frame_visualizer"):

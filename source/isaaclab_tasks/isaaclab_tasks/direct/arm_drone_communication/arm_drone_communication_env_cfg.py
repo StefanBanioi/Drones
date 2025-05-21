@@ -24,7 +24,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     #episode_length_s = 4 # seconds
     
     # going to try a little test where the episode_length is less than 4 seconds (try to converge faster)
-    episode_length_s = 6 # seconds
+    episode_length_s = 4 # seconds
 
     decimation = 2
     #action_space = 4 # this means we have 4 actions output. (for only the drone)
@@ -111,28 +111,42 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     # orientation_reward_scale = 1        # Encourage robot EE to face upwards
 
 
-    distance_to_goal_reward_scale = 125.0   # Reward approaching robot EE
-    smooth_landing_bonus = 180.0            # Bonus when drone is both slow and close
-    proximity_bonus = 250.0                 # Bonus when drone is very close
-    time_bonus_scale = 1.0                  # Encourage early task completion
-    orientation_reward_scale = 125.0        # Encourage robot EE to face upwards
-    wrist_height_reward_scale = 180         # Encourage wrists to be at a certain height
-    wrist_height_penalty_scale = -180       # Penalize wrists being too low
+    # distance_to_goal_reward_scale = 125.0   # Reward approaching robot EE
+    # smooth_landing_bonus = 180.0            # Bonus when drone is both slow and close
+    # proximity_bonus = 250.0                 # Bonus when drone is very close
+    # time_bonus_scale = 1.0                  # Encourage early task completion
+    # orientation_reward_scale = 50.0         # Encourage robot EE to face upwards
+    # orientation_penalty_scale = -50.0       # Penalize robot EE facing downwards
+    # wrist_height_reward_scale = 75          # Encourage wrists to be at a certain height
+    # wrist_height_penalty_scale = -25        # Penalize wrists being too low
+    # interception_reward = 15.0              # Reward for intercepting the drone
+    # # punishments    
+    # lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
+    # ang_vel_reward_scale = -0.01           # Penalize angular velocity (drone)
+    # unstable_penalty = -2.0                # Penalty when drone is unstable
+    # time_penalty = -0.01                   # Per-step penalty to encourage speed
+    # died_penalty = -100.0                 # Penalty for going out of bounds
+
+
+
+    # Testing a more aggressive catching 
+    distance_to_goal_reward_scale = 200.0        # ⬆️ prioritize approach
+    smooth_landing_bonus = 180                  # ⛔ remove slow-landing bias
+    proximity_bonus = 250.0                      # ✅ but modify in code to require drone speed > X
+    time_bonus_scale = 5.0                       # ⬆️ push fast intercepts
+    orientation_reward_scale = 70                # 👍 keep
+    wrist_height_reward_scale = 75               # maybe keep (depends on your arm catching height)
+    wrist_height_penalty_scale = -25             # maybe keep
+    interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
 
     # punishments    
-    lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
-    ang_vel_reward_scale = -0.10           # Penalize angular velocity (drone)
-    unstable_penalty = -2.0                # Penalty when drone is unstable
-    time_penalty = -0.01                   # Per-step penalty to encourage speed
-    angular_vel_threshold = 55            # Threshold for defining "unstable"
-    died_penalty = -500.0                 # Penalty for going out of bounds
+    lin_vel_reward_scale = 0.0                   # 🟡 temporarily disable velocity penalty — we want movement!
+    ang_vel_reward_scale = -0.01                 # keep
+    unstable_penalty = -2.0                      # keep
+    time_penalty = -0.02                         # ⬆️ to push efficiency
+    died_penalty = -100.0                        # keep
 
-
-
-
-
-
-
+    
 
 
 
