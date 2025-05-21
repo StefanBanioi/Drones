@@ -30,7 +30,8 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     #action_space = 4 # this means we have 4 actions output. (for only the drone)
     action_space = 10 # this means we have 10 actions output. (for the drone 4 + the arm 6)
     #observation_space = 12 # this means we have 12 observations (for the drone)
-    observation_space = 24 # this means we have 24 observations (for the drone 12 + the arm 12)
+    #observation_space = 24 # this means we have 24 observations (for the drone 12 + the arm 12)
+    observation_space = 27 # this means we have 27 observations (for the drone 12 + the arm 12 + 3 for the wind)
     state_space = 0
     debug_vis = True
 

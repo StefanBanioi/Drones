@@ -20,6 +20,11 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import quat_apply
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.sim import UsdFileCfg, PreviewSurfaceCfg
+from isaaclab.utils.math import quat_from_angle_axis
+
+
 
 
 from isaaclab.markers import CUBOID_MARKER_CFG  # isort: skip
@@ -32,6 +37,23 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
     def __init__(self, cfg: ArmDroneCommunicationEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
+
+        # Adding the wind forces to the drone
+        self.wind_forces = torch.zeros((self.num_envs, 1, 3), device=self.device)  # shape: [envs, bodies, vec3]
+
+        
+        # === Add wind marker config ===
+        self.wind_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/World/Visuals/WindMarkers",
+            markers={
+                "wind_arrow": UsdFileCfg(
+                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                    scale=(0.5, 0.1, 0.1),
+                    visual_material=PreviewSurfaceCfg(diffuse_color=(0.2, 0.6, 1.0)),
+                )
+            }
+        )
+        self.wind_markers = VisualizationMarkers(self.wind_marker_cfg)
 
         self._step_count = 0
 
@@ -154,6 +176,15 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
     def _apply_action(self):
         self._DroneRobot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
+        # Apply wind forces to the drone
+        # Apply wind forces as external force (local frame assumed ≈ world here)
+        self._DroneRobot.set_external_force_and_torque(
+            forces=self.wind_forces,
+            torques=torch.zeros_like(self.wind_forces),
+            body_ids=self._body_id
+        )
+
+
     def _get_observations(self) -> dict:
 
 
@@ -166,6 +197,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         joint_pos = self._finalUr10.data.joint_pos
         joint_vel = self._finalUr10.data.joint_vel
 
+        # Get the wind as part of the observation
+        wind_forces = self.wind_forces[:, 0, :].squeeze(1)  # shape [num_envs, 3]
+
         obs = torch.cat(
             [
                 self._DroneRobot.data.root_lin_vel_b,        #(3,)
@@ -176,6 +210,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 # add the joint state of the UR10 arm
                 joint_pos,                              #(6,)
                 joint_vel,                              #(6,)
+
+                # add the wind forces
+                wind_forces,                            #(3,)
 
 
             ],
@@ -495,6 +532,18 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self._finalUr10.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
 
+        # Adding the wind forces to the drone
+        # Random wind direction per env (XY only, Z is calm)
+        wind_direction = torch.randn((len(env_ids), 2), device=self.device)
+        wind_direction = torch.nn.functional.normalize(wind_direction, dim=1)  # unit vectors
+        wind_strength = torch.empty(len(env_ids), device=self.device).uniform_(1.0, 3.0)  # m/s² force range
+
+        # Assign XY wind forces (Z = 0)
+        self.wind_forces[env_ids, 0, 0] = wind_direction[:, 0] * wind_strength
+        self.wind_forces[env_ids, 0, 1] = wind_direction[:, 1] * wind_strength
+        self.wind_forces[env_ids, 0, 2] = 0.0
+
+
 
     def _set_debug_vis_impl(self, debug_vis: bool):
             # create markers if necessary for the first tome
@@ -538,6 +587,28 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         success_count = (status == 1).sum()
         failure_count = (status == -1).sum()
         print(f"[STEP {self._step_count}] Success: {success_count} | Failure: {failure_count}")
+
+
+        # === Wind vector visualization using markers ===
+        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+        wind_vecs = self.wind_forces[:, 0, :]
+
+        # Normalize direction (avoid zero-division)
+        wind_dirs = torch.nn.functional.normalize(wind_vecs, dim=1)
+        arrow_length = 0.4  # Visual length of arrow
+
+        # Arrow tip positions (for orientation)
+        arrow_tip = drone_pos + wind_dirs * arrow_length
+
+        # Orientations from drone_pos → arrow_tip
+        arrow_orientations = quat_from_angle_axis(
+            angles=torch.atan2(wind_dirs[:, 1], wind_dirs[:, 0]),  # yaw only (flat wind)
+            axis=torch.tensor([0.0, 0.0, 1.0], device=self.device)
+        )
+
+        # Visualize wind arrows
+        self.wind_markers.visualize(positions=drone_pos, orientations=arrow_orientations)
+
 
 
 
