@@ -23,6 +23,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sim import UsdFileCfg, PreviewSurfaceCfg
 from isaaclab.utils.math import quat_from_angle_axis
+from isaaclab.sim import CylinderCfg, PreviewSurfaceCfg
 
 
 
@@ -40,6 +41,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
         # Adding the wind forces to the drone
         self.wind_forces = torch.zeros((self.num_envs, 1, 3), device=self.device)  # shape: [envs, bodies, vec3]
+        # For wind gust control
+        self.wind_gust_timer = torch.zeros(self.num_envs, device=self.device)         # seconds remaining of gust
+        self.wind_gust_cooldown = torch.zeros(self.num_envs, device=self.device)      # cooldown before next gust
+        self.active_wind_force = torch.zeros((self.num_envs, 1, 3), device=self.device)  # actual force applied
+
 
         
         # === Add wind marker config ===
@@ -48,11 +54,14 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             markers={
                 "wind_arrow": UsdFileCfg(
                     usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
-                    scale=(0.5, 0.1, 0.1),
-                    visual_material=PreviewSurfaceCfg(diffuse_color=(0.2, 0.6, 1.0)),
+                    #scale=(0.5, 0.1, 0.1),
+                    scale=(0.25, 0.05, 1.5),
+                    # visual_material=PreviewSurfaceCfg(diffuse_color=(0.2, 0.6, 1.0)),
+                    visual_material=PreviewSurfaceCfg(diffuse_color=(0.4, 0.2, 0.8)),
                 )
             }
         )
+
         self.wind_markers = VisualizationMarkers(self.wind_marker_cfg)
 
         self._step_count = 0
@@ -98,7 +107,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Get specific body indices
         self._body_id = self._DroneRobot.find_bodies("body")[0]
         #self._robot_mass = self._DroneRobot.root_physx_view.get_masses()[0].sum()
-        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum())   # scale to 3x size (volume scales with the cube of length)
+        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum())  # Scale the mass by 27 as the quadcopter is scaled by 3 and the mass is cubed  
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 
@@ -174,16 +183,43 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # === End of added code ===
     
     def _apply_action(self):
-        self._DroneRobot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
-        # Apply wind forces to the drone
-        # Apply wind forces as external force (local frame assumed ≈ world here)
+        # === Wind gust logic ===
+        dt = self.step_dt
+        self.wind_gust_timer -= dt
+        self.wind_gust_cooldown -= dt
+
+        # End gusts
+        gust_end = self.wind_gust_timer <= 0
+        self.active_wind_force[gust_end] = 0.0
+
+        # Start new gusts (randomly if cooldown expired)
+        can_gust = self.wind_gust_cooldown <= 0
+        start_gust = torch.rand(self.num_envs, device=self.device) < 0.02  # ~2% chance per frame
+
+        trigger_gust = can_gust & start_gust
+
+        if trigger_gust.any():
+            gust_dirs = torch.nn.functional.normalize(torch.randn_like(self.active_wind_force), dim=-1)
+            gust_mags = torch.empty((self.num_envs, 1, 1), device=self.device).uniform_(0.4, 1.0)  # stronger range
+            self.active_wind_force[trigger_gust] = gust_dirs[trigger_gust] * gust_mags[trigger_gust]
+            self.wind_gust_timer[trigger_gust] = torch.randint(15, 40, (trigger_gust.sum(),), device=self.device) * dt  # ~0.15–0.4s gust
+            self.wind_gust_cooldown[trigger_gust] = torch.randint(100, 300, (trigger_gust.sum(),), device=self.device) * dt  # ~1–3s before next
+
+
+        # Combine thrust and wind forces
+        # combined_forces = self._thrust + self.wind_forces    # constant random wind force
+        combined_forces = self._thrust + self.active_wind_force            # add gust wind force
+        combined_torques = self._moment  # no wind torque for now
+
+        # Apply combined force and torque to the drone
         self._DroneRobot.set_external_force_and_torque(
-            forces=self.wind_forces,
-            torques=torch.zeros_like(self.wind_forces),
+            forces=combined_forces,
+            torques=combined_torques,
             body_ids=self._body_id
         )
 
+    
 
     def _get_observations(self) -> dict:
 
@@ -249,7 +285,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
         # 
         # Require that the drone is close AND moving faster than X m/s
-        proximity = ((distance_to_goal < 0.2) & (lin_vel > 4.0)).float()
+        proximity = ((distance_to_goal < 0.25) & (lin_vel > 4.0)).float()
 
 
         # --- Time-based shaping (inverse of time taken) ---
@@ -536,12 +572,13 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Random wind direction per env (XY only, Z is calm)
         wind_direction = torch.randn((len(env_ids), 2), device=self.device)
         wind_direction = torch.nn.functional.normalize(wind_direction, dim=1)  # unit vectors
-        wind_strength = torch.empty(len(env_ids), device=self.device).uniform_(1.0, 3.0)  # m/s² force range
+        wind_strength = torch.empty(len(env_ids), device=self.device).uniform_(self.cfg.lower_wind_scale, self.cfg.upper_wind_scale)  # m/s force range
 
         # Assign XY wind forces (Z = 0)
         self.wind_forces[env_ids, 0, 0] = wind_direction[:, 0] * wind_strength
         self.wind_forces[env_ids, 0, 1] = wind_direction[:, 1] * wind_strength
         self.wind_forces[env_ids, 0, 2] = 0.0
+
 
 
 
@@ -578,53 +615,113 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 if hasattr(self, "ee_frame_visualizer"):
                     self.ee_frame_visualizer.set_visibility(False)
 
-    def _debug_vis_callback(self, event):
-        # update the markers
-        self.goal_pos_visualizer.visualize(self._desired_pos_w)
+    # def _debug_vis_callback(self, event):
+    #     # update the markers
+    #     self.goal_pos_visualizer.visualize(self._desired_pos_w)
 
-        # === Visualize Success/Failure ===
-        status = self._success_status.cpu().numpy()
-        success_count = (status == 1).sum()
-        failure_count = (status == -1).sum()
-        print(f"[STEP {self._step_count}] Success: {success_count} | Failure: {failure_count}")
+    #     # === Visualize Success/Failure ===
+    #     status = self._success_status.cpu().numpy()
+    #     success_count = (status == 1).sum()
+    #     failure_count = (status == -1).sum()
+    #     print(f"[STEP {self._step_count}] Success: {success_count} | Failure: {failure_count}")
 
 
-        # === Wind vector visualization using markers ===
-        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
-        wind_vecs = self.wind_forces[:, 0, :]
+    #     # === Wind vector visualization using markers ===
+    #     drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+    #     wind_vecs = self.wind_forces[:, 0, :]
 
-        # Normalize direction (avoid zero-division)
-        wind_dirs = torch.nn.functional.normalize(wind_vecs, dim=1)
-        arrow_length = 0.4  # Visual length of arrow
+    #     # Normalize direction
+    #     wind_dirs = torch.nn.functional.normalize(wind_vecs, dim=1)
+    #     arrow_length = 0.4  # visual scaling
+    #     yaw_angles = torch.atan2(wind_dirs[:, 1], wind_dirs[:, 0])
 
-        # Arrow tip positions (for orientation)
-        arrow_tip = drone_pos + wind_dirs * arrow_length
+    #     # Build z-aligned rotation
+    #     z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1)
+    #     arrow_orientations = quat_from_angle_axis(yaw_angles, z_axis)
 
-        # Orientations from drone_pos → arrow_tip
-        arrow_orientations = quat_from_angle_axis(
-            angles=torch.atan2(wind_dirs[:, 1], wind_dirs[:, 0]),  # yaw only (flat wind)
-            axis=torch.tensor([0.0, 0.0, 1.0], device=self.device)
-        )
+    #     # Visualize using positional args
+    #     self.wind_markers.visualize(drone_pos, arrow_orientations)
 
-        # Visualize wind arrows
-        self.wind_markers.visualize(positions=drone_pos, orientations=arrow_orientations)
+
 
 
 
 
         
-        # Update end effector frame marker
+    #     # Update end effector frame marker
+    #     if hasattr(self, "ee_frame_visualizer"):
+    #         ee_indices = self._finalUr10.find_bodies("ee_link")
+    #         if len(ee_indices) > 0:
+    #             ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
+    #             ee_quat = self._finalUr10.data.body_quat_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
+    #             self.ee_frame_visualizer.visualize(ee_pos, ee_quat)
+                
+    #             #Print alignment value for debugging
+    #             # if hasattr(self, "_ee_alignment"):
+    #             #     alignment = self._ee_alignment[0].item()  # Get the first environment's alignment
+    #             #     # Only print every 100 steps to avoid flooding the console
+    #                 # if self.step_count % 100 == 0:
+    #                 #     print(f"EE alignment with world up: {alignment:.4f} - " +
+    #                 #           f"{'GOOD (pointing up)' if alignment > 0.7 else 'POOR (not pointing up)'}")
+
+    def _debug_vis_callback(self, event):
+        # === Existing success/failure print ===
+        status = self._success_status.cpu().numpy()
+        print(f"[STEP {self._step_count}] Success: {(status == 1).sum()} | Failure: {(status == -1).sum()}")
+
+        # === Wind arrow visualization ===
+        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+        wind_vecs = self.active_wind_force[:, 0, :]  # [N, 3]
+
+        # Normalize direction for orientation
+        wind_dirs = torch.nn.functional.normalize(wind_vecs, dim=1)
+        arrow_length = 0.4
+        arrow_tip = drone_pos + wind_dirs * arrow_length
+
+        # Orientation (yaw around Z-axis)
+        yaw_angles = torch.atan2(wind_dirs[:, 1], wind_dirs[:, 0])
+        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1)
+        arrow_orientations = quat_from_angle_axis(yaw_angles, z_axis)
+
+        # === Compute wind color ===
+        # Norm of each force vector (N)
+        wind_mags = torch.norm(wind_vecs, dim=-1)
+
+        # Normalize for coloring: 0 N → blue, 1.0+ N → red
+        normed = wind_mags.clamp(0.0, 1.0)
+
+        # Map to RGB: blue → yellow → red
+        # We'll use a 3-point linear interpolation
+        # 0.0  → light blue:  (0.2, 0.6, 1.0)
+        # 0.5  → yellow:      (1.0, 1.0, 0.0)
+        # 1.0+ → red:         (1.0, 0.0, 0.0)
+        colors = torch.zeros((self.num_envs, 3), device=self.device)
+
+        # Between blue and yellow
+        low_mask = normed < 0.5
+        t_low = normed[low_mask] * 2.0  # map to [0, 1]
+        colors[low_mask] = (
+            (1.0 - t_low).unsqueeze(-1) * torch.tensor([0.2, 0.6, 1.0], device=self.device)
+            + t_low.unsqueeze(-1) * torch.tensor([1.0, 1.0, 0.0], device=self.device)
+        )
+
+        # Between yellow and red
+        high_mask = normed >= 0.5
+        t_high = (normed[high_mask] - 0.5) * 2.0  # map to [0, 1]
+        colors[high_mask] = (
+            (1.0 - t_high).unsqueeze(-1) * torch.tensor([1.0, 1.0, 0.0], device=self.device)
+            + t_high.unsqueeze(-1) * torch.tensor([1.0, 0.0, 0.0], device=self.device)
+        )
+
+        # === Visualize ===
+        self.wind_markers.visualize(
+            drone_pos, arrow_orientations, colors
+        )
+
+                # Update end effector frame marker
         if hasattr(self, "ee_frame_visualizer"):
             ee_indices = self._finalUr10.find_bodies("ee_link")
             if len(ee_indices) > 0:
                 ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
                 ee_quat = self._finalUr10.data.body_quat_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
                 self.ee_frame_visualizer.visualize(ee_pos, ee_quat)
-                
-                #Print alignment value for debugging
-                # if hasattr(self, "_ee_alignment"):
-                #     alignment = self._ee_alignment[0].item()  # Get the first environment's alignment
-                #     # Only print every 100 steps to avoid flooding the console
-                    # if self.step_count % 100 == 0:
-                    #     print(f"EE alignment with world up: {alignment:.4f} - " +
-                    #           f"{'GOOD (pointing up)' if alignment > 0.7 else 'POOR (not pointing up)'}")

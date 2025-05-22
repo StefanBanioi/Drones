@@ -131,13 +131,13 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
 
     # Testing a more aggressive catching 
-    distance_to_goal_reward_scale = 200.0        # ⬆️ prioritize approach
+    distance_to_goal_reward_scale = 300.0        # ⬆️ prioritize approach
     smooth_landing_bonus = 180                  # ⛔ remove slow-landing bias
     proximity_bonus = 250.0                      # ✅ but modify in code to require drone speed > X
     time_bonus_scale = 5.0                       # ⬆️ push fast intercepts
-    orientation_reward_scale = 70                # 👍 keep
+    orientation_reward_scale = 25                # 👍 keep
     wrist_height_reward_scale = 75               # maybe keep (depends on your arm catching height)
-    wrist_height_penalty_scale = -25             # maybe keep
+    wrist_height_penalty_scale = -75             # maybe keep
     interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
 
     # punishments    
@@ -148,6 +148,9 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     died_penalty = -100.0                        # keep
 
     
+    # wind scale
+    lower_wind_scale = 0.2
+    upper_wind_scale = 0.5
 
 
 
