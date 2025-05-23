@@ -45,6 +45,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self.wind_gust_timer = torch.zeros(self.num_envs, device=self.device)         # seconds remaining of gust
         self.wind_gust_cooldown = torch.zeros(self.num_envs, device=self.device)      # cooldown before next gust
         self.active_wind_force = torch.zeros((self.num_envs, 1, 3), device=self.device)  # actual force applied
+        self._magnet_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) # Magnetic capture condition active
 
 
         
@@ -91,7 +92,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 "proximity",
                 "time_shaping",
                 "orientation_reward",
-                #"interception_reward",
+                "magnet_reward",
+                "alignment_reward",
+                
                 
                 # === Added code today 15/05/2025 ===
                 "died_penalty",
@@ -102,36 +105,12 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Add after self._episode_sums
         self._success_status = torch.zeros(self.num_envs, dtype=torch.int8, device=self.device)
 
-
-
         # Get specific body indices
         self._body_id = self._DroneRobot.find_bodies("body")[0]
         #self._robot_mass = self._DroneRobot.root_physx_view.get_masses()[0].sum()
         self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum())  # Scale the mass by 27 as the quadcopter is scaled by 3 and the mass is cubed  
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
-
-        # === Added code today 15/05/2025 ===
-        
-        # # === Goal setup (optional, based on your reward function) ===
-        # self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
-
-        # # Base local goal position
-        # base_local_goal = torch.tensor([1.0, -1.0, 1.0], device=self.device)  # (3,)
-
-        # # Add randomness per environment (e.g., ±0.2 meters)
-        # random_offset = torch.empty((self.num_envs, 3), device=self.device).uniform_(-0.4, 0.4)
-
-        # # Compute world-space goal per environment
-        # goal_pos_w = self._terrain.env_origins + base_local_goal + random_offset  # (num_envs, 3)
-
-        # # Assign goal positions
-        # self.goal_pos[:] = goal_pos_w
-
-        # # Try a fixed position for the goal 
-        # self._desired_pos_w = self.goal_pos
-
-        # === End of added code ===
 
         # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self.set_debug_vis(self.cfg.debug_vis)
@@ -156,16 +135,36 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
     def _pre_physics_step(self, actions: torch.Tensor):
         self._actions = actions.clone().clamp(-1.0, 1.0)
         self._step_count += 1
+        self._actions = actions
+
+        # === Deactivate drone control if magnet is active ===
+        if self._magnet_active.any():
+            actions[self._magnet_active] = 0.0
 
         # Drone thrust and moment (new)
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
         self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:4]
 
-        # UR10 joint targets
-        joint_targets = self._actions[:, 4:] * torch.tensor(
-            [2.0, 2.0, 2.0, 3.14, 3.14, 3.14], device=self.device
+        # UR10 joint targets.
+        joint_target_pos = self._actions[:, 4:] * torch.tensor(
+            [
+                1.5708,   # shoulder_pan_joint: 90°
+                -0.7854,   # shoulder_lift_joint: -45°
+                -0.7854,   # elbow_joint: -45°
+                0.0000,   # wrist_1_joint: 0°
+                1.5708,   # wrist_2_joint: 90°
+                0.0000    # wrist_3_joint: 0°
+            ],
+            device=self.device
         )
-        self._finalUr10.set_joint_position_target(joint_targets)
+
+        #self._finalUr10.set_joint_position_target(joint_target_pos)
+
+        static_pose = torch.tensor(
+            [1.5708, -0.7854, -0.7854, 0.0, 1.5708, 0.0], device=self.device
+        ).unsqueeze(0).repeat(self.num_envs, 1)
+
+        self._finalUr10.set_joint_position_target(static_pose)
 
         # Update desired_pos_w (target for drone) to UR10 end-effector position
         ee_indices = self._finalUr10.find_bodies("ee_link")
@@ -175,16 +174,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Always fetch the current ee_link position each step
         ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 3]
 
-        # === Added code today 15/05/2025 ===
-        # Comment this out and instead Use the fixed position for the goal
         self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
-        # Try a fixed position for the goal 
-        #self._desired_pos_w = self.goal_pos
-        # === End of added code ===
-    
-    def _apply_action(self):
 
-        # === Wind gust logic ===
+        # Check for Magnetic Capture Condition with Orientation Alignment (MCCOA)
+
+    def _apply_action(self):
         dt = self.step_dt
         self.wind_gust_timer -= dt
         self.wind_gust_cooldown -= dt
@@ -195,31 +189,59 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
         # Start new gusts (randomly if cooldown expired)
         can_gust = self.wind_gust_cooldown <= 0
-        start_gust = torch.rand(self.num_envs, device=self.device) < 0.02  # ~2% chance per frame
-
+        start_gust = torch.rand(self.num_envs, device=self.device) < 0.02
         trigger_gust = can_gust & start_gust
 
         if trigger_gust.any():
             gust_dirs = torch.nn.functional.normalize(torch.randn_like(self.active_wind_force), dim=-1)
-            gust_mags = torch.empty((self.num_envs, 1, 1), device=self.device).uniform_(0.4, 1.0)  # stronger range
+            gust_mags = torch.empty((self.num_envs, 1, 1), device=self.device).uniform_(0.4, 1.0)
             self.active_wind_force[trigger_gust] = gust_dirs[trigger_gust] * gust_mags[trigger_gust]
-            self.wind_gust_timer[trigger_gust] = torch.randint(15, 40, (trigger_gust.sum(),), device=self.device) * dt  # ~0.15–0.4s gust
-            self.wind_gust_cooldown[trigger_gust] = torch.randint(100, 300, (trigger_gust.sum(),), device=self.device) * dt  # ~1–3s before next
+            self.wind_gust_timer[trigger_gust] = torch.randint(15, 40, (trigger_gust.sum(),), device=self.device) * dt
+            self.wind_gust_cooldown[trigger_gust] = torch.randint(100, 300, (trigger_gust.sum(),), device=self.device) * dt
+
+        # === Only apply forces to non-magnetized drones ===
+        not_magnetized = ~self._magnet_active
+        if not_magnetized.any():
+            env_ids = torch.nonzero(not_magnetized, as_tuple=False).squeeze(-1)
+
+            combined_forces = self._thrust[env_ids] + self.active_wind_force[env_ids]
+            combined_torques = self._moment[env_ids]
+
+            # Safely select body_ids (adjust as needed depending on actual type)
+            if isinstance(self._body_id, torch.Tensor):
+                if self._body_id.ndim == 1:
+                    body_ids = self._body_id[env_ids]
+                else:
+                    body_ids = self._body_id.index_select(0, env_ids)
+            elif isinstance(self._body_id, list):
+                body_ids = torch.stack([self._body_id[i] for i in env_ids])
+            else:
+                raise TypeError("Unsupported body_id format")
+
+            self._DroneRobot.set_external_force_and_torque(
+                forces=combined_forces,
+                torques=combined_torques,
+                body_ids=body_ids
+            )
 
 
-        # Combine thrust and wind forces
-        # combined_forces = self._thrust + self.wind_forces    # constant random wind force
-        combined_forces = self._thrust + self.active_wind_force            # add gust wind force
-        combined_torques = self._moment  # no wind torque for now
 
-        # Apply combined force and torque to the drone
-        self._DroneRobot.set_external_force_and_torque(
-            forces=combined_forces,
-            torques=combined_torques,
-            body_ids=self._body_id
-        )
+        # === Magnetized drones are frozen ===
+        magnetized = self._magnet_active
+        if magnetized.any():
+            attached = torch.nonzero(magnetized).squeeze(-1)
+            self._DroneRobot.data.root_pos_w[attached] = self._desired_pos_w[attached]
+            self._DroneRobot.data.root_lin_vel_b[attached] = 0.0
+            self._DroneRobot.data.root_ang_vel_b[attached] = 0.0
 
-    
+            # self._DroneRobot.disable_gravity(attached, True)
+            # self._DroneRobot.disable_physics(attached, True)
+
+            # (Optional) match orientation:
+            # ee_rot = self._finalUr10.data.body_quat_w[:, ee_indices[0], :]
+            # self._DroneRobot.data.root_quat_w[attached] = ee_rot[attached]
+
+
 
     def _get_observations(self) -> dict:
 
@@ -236,6 +258,8 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Get the wind as part of the observation
         wind_forces = self.wind_forces[:, 0, :].squeeze(1)  # shape [num_envs, 3]
 
+        
+
         obs = torch.cat(
             [
                 self._DroneRobot.data.root_lin_vel_b,        #(3,)
@@ -250,7 +274,6 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 # add the wind forces
                 wind_forces,                            #(3,)
 
-
             ],
             dim=-1,
         )
@@ -263,7 +286,10 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         lin_vel = torch.sum(torch.square(self._DroneRobot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
         drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
-        
+        ee_pos = self._finalUr10.data.body_pos_w[:, self._finalUr10.find_bodies("ee_link")[0], :]
+            # [N, 4] quaternions
+        drone_quat = self._DroneRobot.data.root_quat_w
+        ee_quat = self._finalUr10.data.body_quat_w[:, self._finalUr10.find_bodies("ee_link")[0], :]
         # Distance from drone to robot end-effector (goal)
         distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
@@ -278,37 +304,36 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Track whether each env has met landing condition (but don't mark it as successful yet)
         self._episode_success_flags |= (is_close & is_slow)
 
+        # Drone's "up" vector (assume Z-axis in drone local frame)
+        drone_up = quat_apply(drone_quat, torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, 3))
+
+        # Arm's X-axis (used as "up" reference)
+        ee_up = quat_apply(ee_quat, torch.tensor([1.0, 0.0, 0.0], device=self.device).expand(self.num_envs, 3))
+
+        # Compute alignment (dot product should be close to 1 if aligned)
+        alignment = torch.sum(drone_up * ee_up, dim=1)  # cosine similarity [-1, 1]
+        aligned_enough = alignment > 0.92          # ~23° alignment cone
 
 
-        # --- Bonus for being very close to the target ---
-        #proximity = (distance_to_goal < 0.1).float() 
+        # Require that the drone is close AND moving slower than X m/s
+        proximity = ((distance_to_goal < 0.25) & (lin_vel < 5.0)).float()
+        
 
-        # 
-        # Require that the drone is close AND moving faster than X m/s
-        proximity = ((distance_to_goal < 0.25) & (lin_vel > 4.0)).float()
+        # Add magnetic condition (you can tweak thresholds)
+        magnet_condition = (distance_to_goal < 0.25) & (lin_vel < 5) & aligned_enough
+
+        # Update the per-env magnet buffer
+        self._magnet_active |= magnet_condition  # stays True once activated
+
 
 
         # --- Time-based shaping (inverse of time taken) ---
         time_shaping = (1.0 - (self.episode_length_buf / self.max_episode_length)) 
 
-        # # === Interception reward (encourages arm to move toward drone mid-air) ===
-        # ee_pos = self._finalUr10.data.body_pos_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 3]
-        # ee_vel = self._finalUr10.data.body_lin_vel_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 3]
-
-        # ee_to_drone = drone_pos - ee_pos  # [N, 3]
-        # ee_to_drone_unit = torch.nn.functional.normalize(ee_to_drone, dim=1)
-
-        # # Dot product → how much arm is moving toward the drone
-        # ee_speed_toward_drone = torch.sum(ee_vel * ee_to_drone_unit, dim=1).clamp(min=0.0)  # [N]
-
-        # interception_reward = ee_speed_toward_drone * self.cfg.interception_reward  # [N]
-
-
-
+    
         # --- Orientation reward: keep UR10 ee_link pointing up ---
         # UR10 X-axis should align with world Z-axis [0, 0, 1]
-        # Assuming ee_link's orientation is available in quaternion
-        ee_quat = self._finalUr10.data.body_quat_w[:, self._finalUr10.find_bodies("ee_link")[0], :]  # [N, 4]
+
         
         # Try all three local axes to see which one we actually want pointing up
         local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
@@ -337,19 +362,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
   
         # Log the actual alignment values for debugging
         self._ee_alignment = z_alignment
-        
-        # Reward positive alignment AND penalize negative alignment
-        # When alignment is positive (pointing up): reward proportionally
-        # When alignment is negative (pointing down): penalize proportionally
+        # Scale the reward
         orientation_reward = z_alignment * self.cfg.orientation_reward_scale
         
         # Log the actual alignment values for debugging
         self._ee_alignment = z_alignment
-
-
-        
-        
-
 
         # === Added code today 15/05/2025 ===
 
@@ -409,6 +426,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         # Scale the reward
         wrist_reward = (wrist_height_score * self.cfg.wrist_height_reward_scale * self.step_dt).squeeze(-1)
 
+        # Alignment reward
+        alignment_reward = alignment * self.cfg.alignment_reward * self.step_dt
+
+        # Magnet reward
+        magnet_reward = magnet_condition.float() * self.cfg.magnet_reward * self.step_dt
 
 
 
@@ -420,7 +442,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             "proximity": proximity * self.cfg.proximity_bonus * self.step_dt,
             "time_shaping": time_shaping * self.cfg.time_bonus_scale * self.step_dt,
             "orientation_reward": orientation_reward * self.step_dt,
-            #"interception_reward": interception_reward * self.step_dt,
+            "magnet_reward": magnet_reward,
+            "alignment_reward": alignment_reward,
+
 
 
             # === Added code today 15/05/2025 ===
@@ -523,12 +547,12 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self.extras["log"]["Episode_Success/timeout"] = timeout_count
 
 
-        
-
         # Reset the robotDrone 
         self._DroneRobot.reset(env_ids)
         # Reset the UR10 arm
-        self._finalUr10.reset(env_ids)
+        #self._finalUr10.reset(env_ids)
+        # Reset the magnet
+        self._magnet_active[env_ids] = False
 
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:
@@ -560,8 +584,8 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         joint_vel = self._finalUr10.data.default_joint_vel[env_ids]
         default_root_state = self._finalUr10.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # X
-        default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # Y
+        # default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # X
+        # default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # Y
 
         self._finalUr10.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._finalUr10.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
@@ -578,9 +602,6 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self.wind_forces[env_ids, 0, 0] = wind_direction[:, 0] * wind_strength
         self.wind_forces[env_ids, 0, 1] = wind_direction[:, 1] * wind_strength
         self.wind_forces[env_ids, 0, 2] = 0.0
-
-
-
 
     def _set_debug_vis_impl(self, debug_vis: bool):
             # create markers if necessary for the first tome
@@ -615,59 +636,10 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
                 if hasattr(self, "ee_frame_visualizer"):
                     self.ee_frame_visualizer.set_visibility(False)
 
-    # def _debug_vis_callback(self, event):
-    #     # update the markers
-    #     self.goal_pos_visualizer.visualize(self._desired_pos_w)
-
-    #     # === Visualize Success/Failure ===
-    #     status = self._success_status.cpu().numpy()
-    #     success_count = (status == 1).sum()
-    #     failure_count = (status == -1).sum()
-    #     print(f"[STEP {self._step_count}] Success: {success_count} | Failure: {failure_count}")
-
-
-    #     # === Wind vector visualization using markers ===
-    #     drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
-    #     wind_vecs = self.wind_forces[:, 0, :]
-
-    #     # Normalize direction
-    #     wind_dirs = torch.nn.functional.normalize(wind_vecs, dim=1)
-    #     arrow_length = 0.4  # visual scaling
-    #     yaw_angles = torch.atan2(wind_dirs[:, 1], wind_dirs[:, 0])
-
-    #     # Build z-aligned rotation
-    #     z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1)
-    #     arrow_orientations = quat_from_angle_axis(yaw_angles, z_axis)
-
-    #     # Visualize using positional args
-    #     self.wind_markers.visualize(drone_pos, arrow_orientations)
-
-
-
-
-
-
-        
-    #     # Update end effector frame marker
-    #     if hasattr(self, "ee_frame_visualizer"):
-    #         ee_indices = self._finalUr10.find_bodies("ee_link")
-    #         if len(ee_indices) > 0:
-    #             ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
-    #             ee_quat = self._finalUr10.data.body_quat_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
-    #             self.ee_frame_visualizer.visualize(ee_pos, ee_quat)
-                
-    #             #Print alignment value for debugging
-    #             # if hasattr(self, "_ee_alignment"):
-    #             #     alignment = self._ee_alignment[0].item()  # Get the first environment's alignment
-    #             #     # Only print every 100 steps to avoid flooding the console
-    #                 # if self.step_count % 100 == 0:
-    #                 #     print(f"EE alignment with world up: {alignment:.4f} - " +
-    #                 #           f"{'GOOD (pointing up)' if alignment > 0.7 else 'POOR (not pointing up)'}")
-
     def _debug_vis_callback(self, event):
         # === Existing success/failure print ===
         status = self._success_status.cpu().numpy()
-        print(f"[STEP {self._step_count}] Success: {(status == 1).sum()} | Failure: {(status == -1).sum()}")
+        #print(f"[STEP {self._step_count}] Success: {(status == 1).sum()} | Failure: {(status == -1).sum()}")
 
         # === Wind arrow visualization ===
         drone_pos = self._DroneRobot.data.root_pos_w[:, :3]

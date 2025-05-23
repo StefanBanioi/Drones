@@ -224,7 +224,7 @@ def main():
             total_timeout += current_timeout
 
             # Log the current success, crash, and timeout   
-            if timestep % 20 == 0:
+            if timestep % 1 == 0:
                 writer.add_scalar("Play_Cumulative/success", total_success, timestep)
                 writer.add_scalar("Play_Cumulative/crash", total_crash, timestep)
                 writer.add_scalar("Play_Cumulative/timeout", total_timeout, timestep)

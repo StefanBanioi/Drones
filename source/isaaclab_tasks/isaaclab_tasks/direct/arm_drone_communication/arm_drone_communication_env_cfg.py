@@ -73,18 +73,28 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/UniversalRobots/UR10/ur10_instanceable.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
+                #disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
+                disable_gravity=True,   # Set to True to disable gravity for the UR10 arm
                 max_depenetration_velocity=5.0,
             ),
             activate_contact_sensors=False,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
+            # joint_pos={
+            #     "shoulder_pan_joint": 0.0,
+            #     "shoulder_lift_joint": -1.712,
+            #     "elbow_joint": 1.712,
+            #     "wrist_1_joint": 0.0,
+            #     "wrist_2_joint": 0.0,
+            #     "wrist_3_joint": 0.0,
+            # },
+            #This is the new initial state for the arm (it makes it look up instead of laying down)
             joint_pos={
-                "shoulder_pan_joint": 0.0,
-                "shoulder_lift_joint": -1.712,
-                "elbow_joint": 1.712,
+                "shoulder_pan_joint": 1.5708,
+                "shoulder_lift_joint": -0.7854,
+                "elbow_joint": -0.7854,
                 "wrist_1_joint": 0.0,
-                "wrist_2_joint": 0.0,
+                "wrist_2_joint": 1.5708,
                 "wrist_3_joint": 0.0,
             },
         ),
@@ -140,6 +150,9 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     wrist_height_penalty_scale = -75             # maybe keep
     interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
 
+    alignment_reward = 25                     # keep (but modify in code to require drone speed > X)
+    magnet_reward = 1000 
+
     # punishments    
     lin_vel_reward_scale = 0.0                   # 🟡 temporarily disable velocity penalty — we want movement!
     ang_vel_reward_scale = -0.01                 # keep
@@ -149,8 +162,8 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
     
     # wind scale
-    lower_wind_scale = 0.2
-    upper_wind_scale = 0.5
+    lower_wind_scale = 0.1
+    upper_wind_scale = 0.2
 
 
 
