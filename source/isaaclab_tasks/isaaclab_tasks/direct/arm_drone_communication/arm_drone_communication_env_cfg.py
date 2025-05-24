@@ -146,8 +146,8 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     proximity_bonus = 250.0                      # ✅ but modify in code to require drone speed > X
     time_bonus_scale = 5.0                       # ⬆️ push fast intercepts
     orientation_reward_scale = 25                # 👍 keep
-    wrist_height_reward_scale = 75               # maybe keep (depends on your arm catching height)
-    wrist_height_penalty_scale = -75             # maybe keep
+    wrist_height_reward_scale = 375               # maybe keep (depends on your arm catching height)
+    wrist_height_penalty_scale = -375             # maybe keep
     interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
 
     alignment_reward = 25                     # keep (but modify in code to require drone speed > X)
