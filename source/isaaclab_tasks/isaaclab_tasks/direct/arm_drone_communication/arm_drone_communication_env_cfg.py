@@ -20,17 +20,10 @@ from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 @configclass
 class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
-    # env
-    #episode_length_s = 4 # seconds
     
-    # going to try a little test where the episode_length is less than 4 seconds (try to converge faster)
-    episode_length_s = 4 # seconds
-
-    decimation = 2
-    #action_space = 4 # this means we have 4 actions output. (for only the drone)
+    episode_length_s = 4 # second
+    decimation = 2  #(120Hz simulation, 60Hz inputs)
     action_space = 10 # this means we have 10 actions output. (for the drone 4 + the arm 6)
-    #observation_space = 12 # this means we have 12 observations (for the drone)
-    #observation_space = 24 # this means we have 24 observations (for the drone 12 + the arm 12)
     observation_space = 27 # this means we have 27 observations (for the drone 12 + the arm 12 + 3 for the wind)
     state_space = 0
     debug_vis = True
@@ -142,20 +135,20 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
     # Testing a more aggressive catching 
     distance_to_goal_reward_scale = 300.0        # ⬆️ prioritize approach
-    smooth_landing_bonus = 180                  # ⛔ remove slow-landing bias
+    smooth_landing_bonus = 180                   # ⛔ remove slow-landing bias
     proximity_bonus = 250.0                      # ✅ but modify in code to require drone speed > X
     time_bonus_scale = 5.0                       # ⬆️ push fast intercepts
     orientation_reward_scale = 25                # 👍 keep
-    wrist_height_reward_scale = 0 #75               # maybe keep (depends on your arm catching height)
-    wrist_height_penalty_scale = 0 #-75             # maybe keep
+    wrist_height_reward_scale = 0 #75            # maybe keep (depends on your arm catching height)
+    wrist_height_penalty_scale = 0 #-75          # maybe keep
     interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
 
-    alignment_reward = 25                     # keep (but modify in code to require drone speed > X)
+    alignment_reward = 25                         # keep (but modify in code to require drone speed > X)
     magnet_reward = 1000 
 
     # punishments    
     lin_vel_reward_scale = 0.0                   # 🟡 temporarily disable velocity penalty — we want movement!
-    ang_vel_reward_scale = -0.01                 # keep
+    ang_vel_reward_scale = -0.1                  # keep
     unstable_penalty = -2.0                      # keep
     time_penalty = -0.02                         # ⬆️ to push efficiency
     died_penalty = -100.0                        # keep
@@ -163,7 +156,11 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     
     # wind scale
     lower_wind_scale = 0.1
-    upper_wind_scale = 0.2
+    upper_wind_scale = 0.6
+
+    # Condition for the magnet to catch the drone
+    magnet_condition_distance = 0.1  # Distance at which the magnet can catch the drone
+    magnet_condition_max_speed = 5       # Speed at which the magnet can catch the drone
 
 
 
