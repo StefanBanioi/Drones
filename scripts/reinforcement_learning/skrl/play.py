@@ -187,6 +187,7 @@ def main():
     # reset environment
     obs, _ = env.reset()
     timestep = 0
+    total_magnet_success = 0
     total_success = 0
     total_crash = 0
     total_timeout = 0
@@ -215,17 +216,21 @@ def main():
             # Note: The log data is reset after each episode, so we need to accumulate the values
             current_success = log_data.get("Episode_Success/success", 0)
 
+            curent_magnet_success = log_data.get("Episode_Success/magnet", 0)
+
             current_crash = log_data.get("Episode_Success/crash", 0)
 
             current_timeout = log_data.get("Episode_Success/timeout", 0)
 
             total_success += current_success
+            total_magnet_success += curent_magnet_success
             total_crash += current_crash
             total_timeout += current_timeout
 
             # Log the current success, crash, and timeout   
             if timestep % 1 == 0:
                 writer.add_scalar("Play_Cumulative/success", total_success, timestep)
+                writer.add_scalar("Play_Cumulative/magnet", total_magnet_success, timestep)
                 writer.add_scalar("Play_Cumulative/crash", total_crash, timestep)
                 writer.add_scalar("Play_Cumulative/timeout", total_timeout, timestep)
 
@@ -245,9 +250,11 @@ def main():
 
     # Final metrics summary
     writer.add_scalar("Play_Final/total_success", total_success)
+    writer.add_scalar("Play_Final/total_magnet", total_magnet_success)
     writer.add_scalar("Play_Final/total_crash", total_crash)
     writer.add_scalar("Play_Final/total_timeout", total_timeout)
     print(f"[INFO] Total Success: {total_success}")
+    print(f"[INFO] Total Magnet Success: {total_magnet_success}")
     print(f"[INFO] Total Crash: {total_crash}")
     print(f"[INFO] Total Timeout: {total_timeout}")
 
