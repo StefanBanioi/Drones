@@ -24,7 +24,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     #episode_length_s = 4 # seconds
     
     # going to try a little test where the episode_length is less than 4 seconds (try to converge faster)
-    episode_length_s = 6 # seconds
+    episode_length_s = 4 # seconds
 
     decimation = 2
     #action_space = 4 # this means we have 4 actions output. (for only the drone)
@@ -73,8 +73,8 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Robots/UniversalRobots/UR10/ur10_instanceable.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
-                #disable_gravity=True,   # Set to True to disable gravity for the UR10 arm
+                #disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
+                disable_gravity=True,   # Set to True to disable gravity for the UR10 arm
                 max_depenetration_velocity=5.0,
             ),
             activate_contact_sensors=False,
@@ -89,21 +89,13 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
             #     "wrist_3_joint": 0.0,
             # },
             #This is the new initial state for the arm (it makes it look up instead of laying down)
-            # joint_pos={
-            #     "shoulder_pan_joint": 1.5708,
-            #     "shoulder_lift_joint": -0.7854,
-            #     "elbow_joint": -0.7854,
-            #     "wrist_1_joint": 0.0,
-            #     "wrist_2_joint": 1.5708,
-            #     "wrist_3_joint": 0.0,
-            # },
             joint_pos={
-                "shoulder_pan_joint": 0.0,
-                "shoulder_lift_joint": -0.3476,
-                "elbow_joint": -1.2205,
+                "shoulder_pan_joint": 1.5708,
+                "shoulder_lift_joint": -0.7854,
+                "elbow_joint": -0.7854,
                 "wrist_1_joint": 0.0,
-                "wrist_2_joint": 1.5726,
-                "wrist_3_joint": 0.5253,
+                "wrist_2_joint": 1.5708,
+                "wrist_3_joint": 0.0,
             },
         ),
         actuators={
@@ -130,52 +122,48 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     # orientation_reward_scale = 1        # Encourage robot EE to face upwards
 
 
-    distance_to_goal_reward_scale = 125.0   # Reward approaching robot EE
-    smooth_landing_bonus = 180.0            # Bonus when drone is both slow and close
-    proximity_bonus = 250.0                 # Bonus when drone is very close
-    time_bonus_scale = 1.0                  # Encourage early task completion
-    orientation_reward_scale = 50.0         # Encourage robot EE to face upwards
-    orientation_penalty_scale = -50.0       # Penalize robot EE facing downwards
-    wrist_height_reward_scale = 75          # Encourage wrists to be at a certain height
-    wrist_height_penalty_scale = -25        # Penalize wrists being too low
-    interception_reward = 15.0              # Reward for intercepting the drone
-    
-    alignment_reward = 125                   # Reward for aligning the drone with the robot EE
-    magnet_reward = 1000 
-    
-    # punishments    
-    lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
-    ang_vel_reward_scale = -0.01           # Penalize angular velocity (drone)
-    unstable_penalty = -2.0                # Penalty when drone is unstable
-    time_penalty = -0.01                   # Per-step penalty to encourage speed
-    died_penalty = -100.0                 # Penalty for going out of bounds
-
-
-
-    # # Testing a more aggressive catching 
-    # distance_to_goal_reward_scale = 300.0        # ⬆️ prioritize approach
-    # smooth_landing_bonus = 0 #180                     # ⛔ remove slow-landing bias
-    # proximity_bonus = 250.0                      # ✅ but modify in code to require drone speed > X
-    # time_bonus_scale = 5.0                       # ⬆️ push fast intercepts
-    # orientation_reward_scale = 70                # 👍 keep
-    # wrist_height_reward_scale = 0 #75               # maybe keep (depends on your arm catching height)
-    # wrist_height_penalty_scale = 0 #-50             # maybe keep
-    # interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
-
-    # alignment_reward = 25                     # keep (but modify in code to require drone speed > X)
-    # magnet_reward = 0 
-
+    # distance_to_goal_reward_scale = 125.0   # Reward approaching robot EE
+    # smooth_landing_bonus = 180.0            # Bonus when drone is both slow and close
+    # proximity_bonus = 250.0                 # Bonus when drone is very close
+    # time_bonus_scale = 1.0                  # Encourage early task completion
+    # orientation_reward_scale = 50.0         # Encourage robot EE to face upwards
+    # orientation_penalty_scale = -50.0       # Penalize robot EE facing downwards
+    # wrist_height_reward_scale = 75          # Encourage wrists to be at a certain height
+    # wrist_height_penalty_scale = -25        # Penalize wrists being too low
+    # interception_reward = 15.0              # Reward for intercepting the drone
     # # punishments    
-    # lin_vel_reward_scale = 0.0                   # 🟡 temporarily disable velocity penalty — we want movement!
-    # ang_vel_reward_scale = -0.1                 # keep
-    # unstable_penalty = -2.0                      # keep
-    # time_penalty = -0.02                         # ⬆️ to push efficiency
-    # died_penalty = -100.0                        # keep
+    # lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
+    # ang_vel_reward_scale = -0.01           # Penalize angular velocity (drone)
+    # unstable_penalty = -2.0                # Penalty when drone is unstable
+    # time_penalty = -0.01                   # Per-step penalty to encourage speed
+    # died_penalty = -100.0                 # Penalty for going out of bounds
+
+
+
+    # Testing a more aggressive catching 
+    distance_to_goal_reward_scale = 300.0        # ⬆️ prioritize approach
+    smooth_landing_bonus = 180                  # ⛔ remove slow-landing bias
+    proximity_bonus = 250.0                      # ✅ but modify in code to require drone speed > X
+    time_bonus_scale = 5.0                       # ⬆️ push fast intercepts
+    orientation_reward_scale = 25                # 👍 keep
+    wrist_height_reward_scale = 0 #75               # maybe keep (depends on your arm catching height)
+    wrist_height_penalty_scale = 0 #-75             # maybe keep
+    interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
+
+    alignment_reward = 25                     # keep (but modify in code to require drone speed > X)
+    magnet_reward = 1000 
+
+    # punishments    
+    lin_vel_reward_scale = 0.0                   # 🟡 temporarily disable velocity penalty — we want movement!
+    ang_vel_reward_scale = -0.01                 # keep
+    unstable_penalty = -2.0                      # keep
+    time_penalty = -0.02                         # ⬆️ to push efficiency
+    died_penalty = -100.0                        # keep
 
     
     # wind scale
-    lower_wind_scale = 0.000000000001
-    upper_wind_scale = 0.000000000002
+    lower_wind_scale = 0.1
+    upper_wind_scale = 0.2
 
 
 
