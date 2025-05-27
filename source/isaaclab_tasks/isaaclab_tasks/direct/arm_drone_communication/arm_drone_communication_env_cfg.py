@@ -154,9 +154,27 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     died_penalty = -100.0                        # keep
 
     
-    # wind scale
-    lower_wind_scale = 0.1
+    # # wind scale for no wind 
+    # lower_wind_scale = 0.0
+    # upper_wind_scale = 0.0
+
+    # # wind scale for wind
+    # lower_wind_scale = 0.1
+    # upper_wind_scale = 0.2
+
+
+    # # wind scale for medium wind
+    # lower_wind_scale = 0.3
+    # upper_wind_scale = 0.45 
+
+    # wind scale for strong wind
+    lower_wind_scale = 0.5
     upper_wind_scale = 0.6
+
+    # wind scale for testing overall performance
+    # lower_wind_scale = 0.1
+    # upper_wind_scale = 0.6
+
 
     # Condition for the magnet to catch the drone
     magnet_condition_distance = 0.1  # Distance at which the magnet can catch the drone

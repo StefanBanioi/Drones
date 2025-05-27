@@ -151,7 +151,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         joint_targets = self._actions[:, 4:] * torch.tensor(
             [2.0, 2.0, 2.0, 3.14, 3.14, 3.14], device=self.device
         )
-        self._finalUr10.set_joint_position_target(joint_targets)
+        #self._finalUr10.set_joint_position_target(joint_targets)
 
         # UR10 joint targets.
         joint_target_pos = self._actions[:, 4:] * torch.tensor(
@@ -166,7 +166,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             device=self.device
         )
         
-        # self._finalUr10.set_joint_position_target(joint_target_pos)
+        self._finalUr10.set_joint_position_target(joint_target_pos)
 
         static_pose = torch.tensor(
             [
@@ -271,9 +271,6 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             attached = torch.nonzero(magnetized).squeeze(-1)  # indices of magnetized drones
             #print(f"[DEBUG] Magnetized drones: {attached.tolist()}")
 
-
-
-
     def _get_observations(self) -> dict:
 
 
@@ -346,8 +343,11 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         proximity = (distance_to_goal < 0.25) #& (lin_vel > 5.0)).float()
         
 
+        # Condition for the magnet to catch the drone
+        # magnet_condition_distance = 0.1  # Distance at which the magnet can catch the drone
+        # magnet_condition_max_speed = 5       # Speed at which the magnet can catch the drone
         # Add magnetic condition (you can tweak thresholds)
-        magnet_condition = (distance_to_goal < 0.20) & (lin_vel < 5) & aligned_enough
+        magnet_condition = (distance_to_goal < self.cfg.magnet_condition_distance) & (lin_vel < self.cfg.magnet_condition_max_speed) & aligned_enough # ~23° alignment cone
 
 
         # --- Time-based shaping (inverse of time taken) ---
@@ -457,6 +457,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
 
         # --- Update the success status ---
 
+        # --- Smooth landing reward (close + slow) ---
+        # is_close = distance_to_goal < 0.25
+        # is_slow = lin_vel < 10
         # Track whether each env has met landing condition (but don't mark it as successful yet)
         self._episode_success_flags |= (is_close & is_slow)
 
@@ -625,7 +628,6 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self._finalUr10.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._finalUr10.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._finalUr10.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-
 
     def _set_debug_vis_impl(self, debug_vis: bool):
             # create markers if necessary for the first tome
