@@ -25,6 +25,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     decimation = 2  #(120Hz simulation, 60Hz inputs)
     action_space = 10 # this means we have 10 actions output. (for the drone 4 + the arm 6)
     observation_space = 27 # this means we have 27 observations (for the drone 12 + the arm 12 + 3 for the wind)
+    #observation_space = 24 # this means we have 24 observations (for the drone 12 + the arm 12)
     state_space = 0
     debug_vis = True
 
@@ -134,29 +135,25 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
 
     # Testing a more aggressive catching 
-    distance_to_goal_reward_scale = 300.0        # ⬆️ prioritize approach
-    smooth_landing_bonus = 180                   # ⛔ remove slow-landing bias
-    proximity_bonus = 250.0                      # ✅ but modify in code to require drone speed > X
-    time_bonus_scale = 5.0                       # ⬆️ push fast intercepts
-    orientation_reward_scale = 25                # 👍 keep
-    wrist_height_reward_scale = 0 #75            # maybe keep (depends on your arm catching height)
-    wrist_height_penalty_scale = 0 #-75          # maybe keep
-    interception_reward = 15.0                   # keep (but modify in code to require drone speed > X)
-
-    alignment_reward = 25                         # keep (but modify in code to require drone speed > X)
+    distance_to_goal_reward_scale = 300.0        
+    smooth_landing_bonus = 180                   
+    proximity_bonus = 250.0                      
+    time_bonus_scale = 5.0                       
+    orientation_reward_scale = 25                
+    wrist_height_reward_scale = 0 #75            
+    wrist_height_penalty_scale = 0 #-75          
+    alignment_reward = 25                        
     magnet_reward = 1000 
 
     # punishments    
-    lin_vel_reward_scale = 0.0                   # 🟡 temporarily disable velocity penalty — we want movement!
-    ang_vel_reward_scale = -0.1                  # keep
-    unstable_penalty = -2.0                      # keep
-    time_penalty = -0.02                         # ⬆️ to push efficiency
-    died_penalty = -100.0                        # keep
+    lin_vel_reward_scale = 0.0                   
+    ang_vel_reward_scale = -0.1                  
+    died_penalty = -100.0                        
 
     
     # # wind scale for no wind 
     # lower_wind_scale = 0.0
-    # upper_wind_scale = 0.0
+    # upper_wind_scale = 0.0 
 
     # # wind scale for wind
     # lower_wind_scale = 0.1
@@ -167,7 +164,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     # lower_wind_scale = 0.3
     # upper_wind_scale = 0.45 
 
-    # wind scale for strong wind
+    # # wind scale for strong wind
     lower_wind_scale = 0.5
     upper_wind_scale = 0.6
 

@@ -180,7 +180,7 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
             device=self.device
         ).unsqueeze(0).repeat(self.num_envs, 1)
 
-        # self._finalUr10.set_joint_position_target(static_pose)
+        #self._finalUr10.set_joint_position_target(static_pose)
 
 
 
