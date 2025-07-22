@@ -12,7 +12,7 @@ This script demonstrates how to simulate a quadcopter.
     ./isaaclab.sh -p scripts/demos/quadcopter.py
 
 """
-#this is a test as to ssee if it works or not. Hehe ;D
+
 """Launch Isaac Sim Simulator first."""
 
 import argparse
@@ -84,7 +84,7 @@ def main():
     # Simulate physics
     while simulation_app.is_running():
         # reset
-        if count % 2000 == 0:
+        if count % 100 == 0:
             # reset counters
             sim_time = 0.0
             count = 0
@@ -96,11 +96,26 @@ def main():
             robot.reset()
             # reset command
             print(">>>>>>>> Reset!")
-        # apply action to the robot (make the robot float in place)
+        # # apply action to the robot (make the robot float in place)
+        # forces = torch.zeros(robot.num_instances, 4, 3, device=sim.device)
+        # torques = torch.zeros_like(forces)
+        # forces[..., 2] = robot_mass * gravity / 4.0
+        # robot.set_external_force_and_torque(forces, torques, body_ids=prop_body_ids)
+
+        # Apply balanced upward thrust
         forces = torch.zeros(robot.num_instances, 4, 3, device=sim.device)
         torques = torch.zeros_like(forces)
+
+        # Apply equal upward force to hover
         forces[..., 2] = robot_mass * gravity / 4.0
+
+        # Apply roll torque to induce tilt and lateral drift
+        torques[..., 0] = 0.021  # Constant roll torque on all props
+
+        # Apply to robot
         robot.set_external_force_and_torque(forces, torques, body_ids=prop_body_ids)
+
+
         robot.write_data_to_sim()
         # perform step
         sim.step()
