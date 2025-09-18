@@ -16,6 +16,7 @@ from isaaclab.utils import configclass
 #from isaaclab_tasks.direct.arm_drone_communication.arm_drone_communication_env import ArmDroneCommunicationEnv
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
+from isaaclab_assets.robots.VertexOneV1 import VERTEX_ONE_CFG
 
 
 @configclass
@@ -58,9 +59,13 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
     # robotDrone
-    robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    thrust_to_weight = 1.9 
-    moment_scale = 0.01  #3.0 # scale the moment of inertia
+    #robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    #robotDrone: ArticulationCfg = VERTEX_ONE_CFG.replace(prim_path="/World/VertexOne")
+    robotDrone: ArticulationCfg = VERTEX_ONE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+        # Robots
+   
+    thrust_to_weight = 1.9
+    moment_scale = 0.01  # 3.0 # scale the moment of inertia
 
     UR10_CFG = ArticulationCfg(
         prim_path="/World/envs/env_.*/UR10",
@@ -172,14 +177,18 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     # lower_wind_scale = 0.1
     # upper_wind_scale = 0.6
 
-
-    # Condition for the magnet to catch the drone
-    magnet_condition_distance = 0.1      # Distance at which the magnet can catch the drone
-    magnet_condition_max_speed = 5       # Speed at which the magnet can catch the drone
+    #Old wind scale for testing with old drone. Triple the conditions for the new bigger drone
+    magnet_condition_distance = 0.3      # Distance at which the magnet can catch the drone
+    magnet_condition_max_speed = 15       # Speed at which the magnet can catch the drone
     magnet_time_threshold_in_seconds = 1  # Number of seconds the drone must be within the magnet condition to be considered caught
+    # Condition for the magnet to catch the drone
+    # magnet_condition_distance = 0.1      # Distance at which the magnet can catch the drone
+    # magnet_condition_max_speed = 5       # Speed at which the magnet can catch the drone
+    # magnet_time_threshold_in_seconds = 1  # Number of seconds the drone must be within the magnet condition to be considered caught
 
     # Conditions for the drone to be considered aligned with the arm's end-effector
-    approach_zone = 0.15  # Distance at which the drone is considered close enough to the arm's end-effector
+    approach_zone = 0.45  # Distance at which the drone is considered close enough to the arm's end-effector
+    #approach_zone = 0.15  # Distance at which the drone is considered close enough to the arm's end-effector
     alignment_threshold = 0.92  # Cosine similarity threshold for alignment (0.92 corresponds to ~23° angle (arccos(0.92) ≈ 23°))
 
 

@@ -117,9 +117,9 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         self._success_status = torch.zeros(self.num_envs, dtype=torch.int8, device=self.device)
 
         # Get specific body indices
+        # self._body_id = self._DroneRobot.find_bodies("MainBody")[0]
         self._body_id = self._DroneRobot.find_bodies("body")[0]
-        #self._robot_mass = self._DroneRobot.root_physx_view.get_masses()[0].sum()
-        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum())  # Scale the mass by 27 as the quadcopter is scaled by 3 and the mass is cubed  
+        self._robot_mass = (self._DroneRobot.root_physx_view.get_masses()[0].sum()) 
         self._gravity_magnitude = torch.tensor(self.sim.cfg.gravity, device=self.device).norm()
         self._robot_weight = (self._robot_mass * self._gravity_magnitude).item()
 

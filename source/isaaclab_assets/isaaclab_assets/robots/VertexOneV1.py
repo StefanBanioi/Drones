@@ -18,7 +18,7 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 VERTEX_ONE_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
-        usd_path="C:\\Users\\UMRobotics\\Desktop\\Stefan Code\\AvularDrone.usd",
+        usd_path="C:\\Users\\UMRobotics\\Desktop\\Stefan Code\\VertexOneV8.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=10.0,
@@ -39,12 +39,10 @@ VERTEX_ONE_CFG = ArticulationCfg(
             ".*": 0.0,
         },
         joint_vel={
-            # The Avular Vertex One V1 doesn't have the Crazyflie spinning rotor joints, 
-            # our mock-up has no moving joints. Forces/torques will later be applied programmatically instead.
-            # "m1_joint": 200.0,# *5.2,
-            # "m2_joint": -200.0,# *5.2,
-            # "m3_joint": 200.0,# *5.2,
-            # "m4_joint": -200.0,# *5.2,
+            "m1_joint": 600.0,# *5.2,
+            "m2_joint": -600.0,# *5.2,
+            "m3_joint": 600.0,# *5.2,
+            "m4_joint": -600.0,# *5.2,
         },
     ),
     actuators={
