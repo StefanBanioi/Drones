@@ -78,12 +78,21 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
             activate_contact_sensors=False,
         ),
         init_state=ArticulationCfg.InitialStateCfg(
+            # joint_pos={
+            #     "shoulder_pan_joint": 0.0,
+            #     "shoulder_lift_joint": -1.712,
+            #     "elbow_joint": 1.712,
+            #     "wrist_1_joint": 0.0,
+            #     "wrist_2_joint": 0.0,
+            #     "wrist_3_joint": 0.0,
+            # },
+            #This is the new initial state for the arm (it makes it look up instead of laying down)
             joint_pos={
-                "shoulder_pan_joint": 0.0,
-                "shoulder_lift_joint": -1.712,
-                "elbow_joint": 1.712,
+                "shoulder_pan_joint": 1.5708,
+                "shoulder_lift_joint": -0.7854,
+                "elbow_joint": -0.7854,
                 "wrist_1_joint": 0.0,
-                "wrist_2_joint": 0.0,
+                "wrist_2_joint": 1.5708,
                 "wrist_3_joint": 0.0,
             },
         ),
@@ -102,7 +111,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # Drone
     Drone_CFG: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     thrust_to_weight = 1.9
-    moment_scale = 0.01 #* 3.0  # Scale the moment of inertia by 3.0
+    moment_scale = 0.01 
 
     # goal object
     goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
@@ -122,18 +131,41 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     vel_obs_scale = 0.2
     act_moving_average = 1.0
     
-    distance_to_goal_reward_scale = 125.0   # Reward approaching robot EE
+    distance_to_goal_reward_scale = 300.0   # Reward approaching robot EE
     smooth_landing_bonus = 180.0            # Bonus when drone is both slow and close
     proximity_bonus = 250.0                 # Bonus when drone is very close
-    time_bonus_scale = 1.0                  # Encourage early task completion
-    orientation_reward_scale = 125.0        # Encourage robot EE to face upwards
-    wrist_height_reward_scale = 180         # Encourage wrists to be at a certain height
-    wrist_height_penalty_scale = -180       # Penalize wrists being too low
+    time_bonus_scale = 5.0                  # Encourage early task completion
+    orientation_reward_scale = 25.0        # Encourage robot EE to face upwards
+    wrist_height_reward_scale = 0 #180         # Encourage wrists to be at a certain height
+    wrist_height_penalty_scale = 0 #-180       # Penalize wrists being too low
 
     # punishments    
-    lin_vel_reward_scale = -0.05           # Penalize high linear velocity (drone)
+    lin_vel_reward_scale = 1.5            #we actually want to incurage speed #-0.05           # Penalize high linear velocity (drone)
     ang_vel_reward_scale = -0.10           # Penalize angular velocity (drone)
-    unstable_penalty = -2.0                # Penalty when drone is unstable
     time_penalty = -0.01                   # Per-step penalty to encourage speed
-    angular_vel_threshold = 55            # Threshold for defining "unstable"
-    died_penalty = -500.0                 # Penalty for going out of bounds
+    died_penalty = -100.0                  # Penalty for going out of bounds
+
+
+    #distance_to_goal_reward_scale = 300.0        
+    #smooth_landing_bonus = 180                   
+    #proximity_bonus = 250.0                      
+    #time_bonus_scale = 5.0                       
+    #orientation_reward_scale = 25                
+    #wrist_height_reward_scale = 0 #75            
+    #wrist_height_penalty_scale = 0 #-75          
+    alignment_reward = 25    # Now more than ever, we want the drone to be aligned with the arm's end-effector (Previously it was 0 as the arm immediately was in the correct initial position)                   
+    magnet_reward = 1000 
+
+    # punishments    
+    #lin_vel_reward_scale = 0.0                   
+    #ang_vel_reward_scale = 2.5 #From -0.1 to -1.0  to -0.3   (Increased to 2.5 as I do want the drone to actually have some tilt)            
+    #died_penalty = -100.0                        
+
+    # Old wind scale for testing with old drone. Triple the conditions for the new bigger drone
+    magnet_condition_distance = 0.4      # Distance at which the magnet can catch the drone
+    magnet_condition_max_speed = 15       # Speed at which the magnet can catch the drone
+    magnet_time_threshold_in_seconds = 1  # Number of seconds the drone must be within the magnet condition to be considered caught
+
+    # Conditions for the drone to be considered aligned with the arm's end-effector
+    approach_zone = 0.90  # Distance at which the drone is considered close enough to the arm's end-effector (90 cm)
+    alignment_threshold = 0.70  # Cosine similarity threshold for alignment (0.70 corresponds to ~45° angle (arccos(0.70) ≈ 45°))  ~45.572996 degrees
