@@ -32,7 +32,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 100,
+        dt=1 / 120,
         render_interval=decimation,
         physics_material=sim_utils.RigidBodyMaterialCfg(
             friction_combine_mode="multiply",
@@ -57,15 +57,15 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
         debug_vis=False,
     )
 
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.5, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=5.0, replicate_physics=True)
     # robotDrone
     #robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     #robotDrone: ArticulationCfg = VERTEX_ONE_CFG.replace(prim_path="/World/VertexOne")
     robotDrone: ArticulationCfg = VERTEX_ONE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    
         # Robots
-   
     thrust_to_weight = 1.9
-    moment_scale = 0.01  # 3.0 # scale the moment of inertia
+    moment_scale = 0.8
 
     UR10_CFG = ArticulationCfg(
         prim_path="/World/envs/env_.*/UR10",
@@ -74,7 +74,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 #disable_gravity=False,   # # Set to True to disable gravity for the UR10 arm
                 disable_gravity=True,   # Set to True to disable gravity for the UR10 arm
-                max_depenetration_velocity=5.0,
+                max_depenetration_velocity=2.0,
             ),
             activate_contact_sensors=False,
         ),
@@ -136,24 +136,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     # unstable_penalty = -2.0                # Penalty when drone is unstable
     # time_penalty = -0.01                   # Per-step penalty to encourage speed
     # died_penalty = -100.0                 # Penalty for going out of bounds
-
-
-
-    # Testing a more aggressive catching 
-    distance_to_goal_reward_scale = 300.0        
-    smooth_landing_bonus = 180                   
-    proximity_bonus = 250.0                      
-    time_bonus_scale = 5.0                       
-    orientation_reward_scale = 25                
-    wrist_height_reward_scale = 0 #75            
-    wrist_height_penalty_scale = 0 #-75          
-    alignment_reward = 25                        
-    magnet_reward = 1000 
-
-    # punishments    
-    lin_vel_reward_scale = 0.0                   
-    ang_vel_reward_scale = -0.30 #From -0.1 to -1.0  to -0.3               
-    died_penalty = -100.0                        
+                     
 
     
     # wind scale for no wind 
@@ -177,103 +160,63 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
     # lower_wind_scale = 0.1
     # upper_wind_scale = 0.6
 
-    #Old wind scale for testing with old drone. Triple the conditions for the new bigger drone
-    magnet_condition_distance = 0.3      # Distance at which the magnet can catch the drone
-    magnet_condition_max_speed = 15       # Speed at which the magnet can catch the drone
-    magnet_time_threshold_in_seconds = 1  # Number of seconds the drone must be within the magnet condition to be considered caught
-    # Condition for the magnet to catch the drone
+
+
+    #_____________________________________________________________________________
+    #_____________________________OLD SETTINGS____________________________________
+    #_____________________________________________________________________________
+
+
+    # # Testing a more aggressive catching 
+    # distance_to_goal_reward_scale = 300.0        
+    # smooth_landing_bonus = 180                   
+    # proximity_bonus = 250.0                      
+    # time_bonus_scale = 5.0                       
+    # orientation_reward_scale = 25                
+    # wrist_height_reward_scale = 0 #75            
+    # wrist_height_penalty_scale = 0 #-75          
+    # alignment_reward = 25                        
+    # magnet_reward = 1000 
+
+    # # punishments    
+    # lin_vel_reward_scale = 0.0                   
+    # ang_vel_reward_scale = -0.30 #From -0.1 to -1.0  to -0.3               
+    # died_penalty = -100.0       
+     
+    # # Old wind scale for testing with old drone. Triple the conditions for the new bigger drone
     # magnet_condition_distance = 0.1      # Distance at which the magnet can catch the drone
     # magnet_condition_max_speed = 5       # Speed at which the magnet can catch the drone
     # magnet_time_threshold_in_seconds = 1  # Number of seconds the drone must be within the magnet condition to be considered caught
+   
+    # Conditions for the drone to be considered aligned with the arm's end-effector
+    # approach_zone = 0.15  # Distance at which the drone is considered close enough to the arm's end-effector
+    # alignment_threshold = 0.92  # Cosine similarity threshold for alignment (0.92 corresponds to ~23° angle (arccos(0.92) ≈ 23°))
+  
+
+    #_____________________________________________________________________________
+    #_____________________________NEW SETTINGS____________________________________
+    #_____________________________________________________________________________               
+
+    distance_to_goal_reward_scale = 300.0        
+    smooth_landing_bonus = 180                   
+    proximity_bonus = 250.0                      
+    time_bonus_scale = 5.0                       
+    orientation_reward_scale = 25                
+    wrist_height_reward_scale = 0 #75            
+    wrist_height_penalty_scale = 0 #-75          
+    alignment_reward = 25    # Now more than ever, we want the drone to be aligned with the arm's end-effector (Previously it was 0 as the arm immediately was in the correct initial position)                   
+    magnet_reward = 1000 
+
+    # punishments    
+    lin_vel_reward_scale = 0.0                   
+    ang_vel_reward_scale = 2.5 #From -0.1 to -1.0  to -0.3   (Increased to 2.5 as I do want the drone to actually have some tilt)            
+    died_penalty = -100.0                        
+
+    # Old wind scale for testing with old drone. Triple the conditions for the new bigger drone
+    magnet_condition_distance = 0.4      # Distance at which the magnet can catch the drone
+    magnet_condition_max_speed = 15       # Speed at which the magnet can catch the drone
+    magnet_time_threshold_in_seconds = 1  # Number of seconds the drone must be within the magnet condition to be considered caught
 
     # Conditions for the drone to be considered aligned with the arm's end-effector
-    approach_zone = 0.45  # Distance at which the drone is considered close enough to the arm's end-effector
-    #approach_zone = 0.15  # Distance at which the drone is considered close enough to the arm's end-effector
-    alignment_threshold = 0.92  # Cosine similarity threshold for alignment (0.92 corresponds to ~23° angle (arccos(0.92) ≈ 23°))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # #reward scales
-    # lin_vel_reward_scale = -0.05
-    # ang_vel_reward_scale = -0.01
-    # distance_to_goal_reward_scale = 15.0 
-    # smooth_landing_bonus = 10.0  # This is a bonus for smooth landing 
-    # proximity_bonus = 25.0       # Strong bonus when drone is really close 
-    # time_bonus_scale = 1.0      # Scales with how fast it finishes
-    # orientation_reward_scale = 1.0  # Reward for pointing ee_link up
-
-    #test 2
-    # Same reward scales but keep everything at 1.0 except for the orientation reward scale
-    # lin_vel_reward_scale = -0.05
-    # ang_vel_reward_scale = -0.01
-    # distance_to_goal_reward_scale = 1.0
-    # smooth_landing_bonus = 1.0  # Tune as needed 
-    # proximity_bonus = 1.0       # Strong bonus when drone is really close
-    # time_bonus_scale = 1.0      # Scales with how fast it finishes
-    # orientation_reward_scale = 10  # Reward for pointing ee_link up
-
-    #test 3
-    # Abusrd value for the orientation reward scale
-    # lin_vel_reward_scale = -0.05
-    # ang_vel_reward_scale = -0.01
-    # distance_to_goal_reward_scale = 1.0
-    # smooth_landing_bonus = 1.0  # Tune as needed
-    # proximity_bonus = 1.0       # Strong bonus when drone is really close
-    # time_bonus_scale = 1.0      # Scales with how fast it finishes
-    # orientation_reward_scale = 1000  # Reward for pointing ee_link up
-    # This is a test to see if the orientation reward even matters or works
-
-    #test 5
-    # lin_vel_reward_scale = -0.05
-    # ang_vel_reward_scale = -0.01
-    # distance_to_goal_reward_scale = 15.0
-    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
-    # proximity_bonus = 25.0       # Strong bonus when drone is really close 
-    # time_bonus_scale = 1.0      # Scales with how fast it finishes
-    # orientation_reward_scale = 1.0  # Reward for pointing ee_link up
-
-
-    
-    #test 6
-    # lin_vel_reward_scale = -0.05
-    # ang_vel_reward_scale = -0.01
-    # distance_to_goal_reward_scale = 15.0
-    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
-    # proximity_bonus = 15.0       # Strong bonus when drone is really close 
-    # time_bonus_scale = 1.0      # Scales with how fast it finishes
-    # orientation_reward_scale = 25.0  # Reward for pointing ee_link up
-
-
-    # #test 7
-    # #with changes suggested by chatgpt
-    # lin_vel_reward_scale = -0.05
-    # ang_vel_reward_scale = -0.01
-    # distance_to_goal_reward_scale = 15.0
-    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
-    # proximity_bonus = 15.0       # Strong bonus when drone is really close
-    # time_bonus_scale = 1.0      # Scales with how fast it finishes
-    # orientation_reward_scale = 100.0 # Reward for pointing ee_link up
-    # upright_bonus_scale = 50.0 
-
-    # #test 8
-
-    # lin_vel_reward_scale = -0.05
-    # ang_vel_reward_scale = -0.01
-    # distance_to_goal_reward_scale = 15.0
-    # smooth_landing_bonus = 10.0  # Tune as needed (was 2 now 10)
-    # proximity_bonus = 25.0       # Strong bonus when drone is really close 
-    # time_bonus_scale = 1.0      # Scales with how fast it finishes
-    # orientation_reward_scale = 10 # Reward for pointing ee_link up
-    # upright_bonus_scale = 20.0
+    approach_zone = 0.90  # Distance at which the drone is considered close enough to the arm's end-effector (90 cm)
+    alignment_threshold = 0.70  # Cosine similarity threshold for alignment (0.70 corresponds to ~45° angle (arccos(0.70) ≈ 45°))  ~45.572996 degrees

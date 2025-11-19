@@ -33,8 +33,8 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # multi-agent specification and spaces definition
     possible_agents = ["_DroneRobot", "_Ur10Arm"]
     action_spaces = {"_DroneRobot": 4, "_Ur10Arm": 6}
-    observation_spaces = {"_DroneRobot": 20, "_Ur10Arm": 34}
-    state_space = 51  # sum of global state dims
+    observation_spaces = {"_DroneRobot": 23, "_Ur10Arm": 37}
+    state_space = 54  # sum of global state dims
     debug_vis = True    
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -113,16 +113,16 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     thrust_to_weight = 1.9
     moment_scale = 0.01 
 
-    # goal object
-    goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/goal_marker",
-        markers={
-            "goal": sim_utils.SphereCfg(
-                radius=0.0335,
-                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.3, 1.0)),
-            ),
-        },
-    )
+    # # goal object
+    # goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
+    #     prim_path="/Visuals/goal_marker",
+    #     markers={
+    #         "goal": sim_utils.SphereCfg(
+    #             radius=0.0335,
+    #             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.3, 1.0)),
+    #         ),
+    #     },
+    # )
 
     # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4090, env_spacing=4.0, replicate_physics=True)
@@ -169,3 +169,24 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # Conditions for the drone to be considered aligned with the arm's end-effector
     approach_zone = 0.90  # Distance at which the drone is considered close enough to the arm's end-effector (90 cm)
     alignment_threshold = 0.70  # Cosine similarity threshold for alignment (0.70 corresponds to ~45° angle (arccos(0.70) ≈ 45°))  ~45.572996 degrees
+
+        # wind scale for no wind 
+    lower_wind_scale = 0.0
+    upper_wind_scale = 0.0 
+
+    # # wind scale for wind
+    # lower_wind_scale = 0.1
+    # upper_wind_scale = 0.2
+
+
+    # # wind scale for medium wind
+    # lower_wind_scale = 0.3
+    # upper_wind_scale = 0.45 
+
+    # # # wind scale for strong wind
+    # lower_wind_scale = 0.5
+    # upper_wind_scale = 0.6
+
+    # wind scale for testing overall performance
+    # lower_wind_scale = 0.1
+    # upper_wind_scale = 0.6

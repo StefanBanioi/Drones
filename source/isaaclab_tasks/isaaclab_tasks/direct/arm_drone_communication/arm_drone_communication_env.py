@@ -20,7 +20,6 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import quat_apply
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
-from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.sim import UsdFileCfg, PreviewSurfaceCfg
 from isaaclab.utils.math import quat_from_angle_axis
 
@@ -144,64 +143,54 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor):
+        # Clamp actions to [-1, 1]
         self._actions = actions.clone().clamp(-1.0, 1.0)
         self._step_count += 1
 
-        # Drone thrust and moment (new)
-        self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
+        # ----------------------------------------------------------------------
+        # Drone thrust and body torques
+        # ----------------------------------------------------------------------
+        # Scale thrust relative to weight (maps action[0] in [-1,1] → [0, thrust_to_weight * weight])
+        thrust_cmd = self.cfg.thrust_to_weight * self._robot_weight * (self._actions[:, 0] + 1.0) / 2.0
+        # Safety clamp to avoid crazy impulses
+        thrust_cmd = torch.clamp(thrust_cmd, 0.0, 2.5 * self._robot_weight)
+        self._thrust[:, 0, 2] = thrust_cmd
+
+        # Scale angular moments (actions[1:4] are roll/pitch/yaw)
         self._moment[:, 0, :] = self.cfg.moment_scale * self._actions[:, 1:4]
+        # Clamp torques to something reasonable for ~3kg craft
+        max_moment = 0.8 * self._robot_weight   # ≈ 23 N·m if mass ≈ 3kg
+        self._moment = torch.clamp(self._moment, -max_moment, max_moment)
 
-        # UR10 joint targets
-        joint_targets = self._actions[:, 4:] * torch.tensor(
-            [2.0, 2.0, 2.0, 3.14, 3.14, 3.14], device=self.device
-        )
-        #self._finalUr10.set_joint_position_target(joint_targets)
+        # TEMP sanity injection: add a small roll torque at the very start to check if body rotates
+        if self._step_count < 50:
+            self._moment[:, 0, 0] += 0.5  # 0.5 N·m roll kick for debugging
 
-        # UR10 joint targets.
+        # ----------------------------------------------------------------------
+        # UR10 joint targets (scaled from actions[4:])
+        # ----------------------------------------------------------------------
         joint_target_pos = self._actions[:, 4:] * torch.tensor(
             [
                 1.5708,   # shoulder_pan_joint: 90°
-                -0.7854,   # shoulder_lift_joint: -45°
-                -0.7854,   # elbow_joint: -45°
-                0.0000,   # wrist_1_joint: 0°
+                -0.7854,  # shoulder_lift_joint: -45°
+                -0.7854,  # elbow_joint: -45°
+                0.0000,   # wrist_1_joint
                 1.5708,   # wrist_2_joint: 90°
-                0.0000    # wrist_3_joint: 0°
+                0.0000    # wrist_3_joint
             ],
             device=self.device
         )
-        
         self._finalUr10.set_joint_position_target(joint_target_pos)
 
-        static_pose = torch.tensor(
-            [
-                1.5708,   # shoulder_pan_joint: 90°
-                -0.7854,   # shoulder_lift_joint: -45°
-                -0.7854,   # elbow_joint: -45°
-                0.0000,   # wrist_1_joint: 0°
-                1.5708,   # wrist_2_joint: 90°
-                0.0000    # wrist_3_joint: 0°
-            ], 
-            device=self.device
-        ).unsqueeze(0).repeat(self.num_envs, 1)
-
-        #self._finalUr10.set_joint_position_target(static_pose)
-
-
-
-        # Update desired_pos_w (target for drone) to UR10 end-effector position
+        # ----------------------------------------------------------------------
+        # Update drone goal position (UR10 ee_link)
+        # ----------------------------------------------------------------------
         ee_indices = self._finalUr10.find_bodies("ee_link")
         if len(ee_indices) == 0:
             raise RuntimeError("Could not find 'ee_link' on UR10!")
-        
-        # Always fetch the current ee_link position each step
-        ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :]  # shape [num_envs, 3]
 
-        # === Added code today 15/05/2025 ===
-        # Comment this out and instead Use the fixed position for the goal
-        self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
-        # Try a fixed position for the goal 
-        #self._desired_pos_w = self.goal_pos
-        # === End of added code ===
+        ee_pos = self._finalUr10.data.body_pos_w[:, ee_indices[0], :]  # [num_envs, 3]
+        self._desired_pos_w = ee_pos.squeeze(1)  # dynamic goal position
 
     def _apply_action(self):
 
@@ -376,16 +365,16 @@ class ArmDroneCommunicationEnv(DirectRLEnv):
         )
 
         # --- DEBUG PRINT: Show which counters reset ---
-        if torch.rand(1).item() < 0.01:
-            reset_mask = ~magnet_condition_raw
-            num_reset = reset_mask.sum().item()
-            reset_indices = torch.nonzero(reset_mask).squeeze().tolist()
+        # if torch.rand(1).item() < 0.01:
+        #     reset_mask = ~magnet_condition_raw
+        #     num_reset = reset_mask.sum().item()
+        #     reset_indices = torch.nonzero(reset_mask).squeeze().tolist()
 
-            print(f"[DEBUG] Magnet counters BEFORE update: {prev_magnet_counter}")
-            print(f"[DEBUG] Magnet condition raw mask: {magnet_condition_raw}")
-            print(f"[DEBUG] Magnet counters AFTER update: {self._magnet_condition_counter}")
-            print(f"[DEBUG] Counters reset this step: {num_reset}")
-            print(f"[DEBUG] Reset indices (envs): {reset_indices}")
+        #     print(f"[DEBUG] Magnet counters BEFORE update: {prev_magnet_counter}")
+        #     print(f"[DEBUG] Magnet condition raw mask: {magnet_condition_raw}")
+        #     print(f"[DEBUG] Magnet counters AFTER update: {self._magnet_condition_counter}")
+        #     print(f"[DEBUG] Counters reset this step: {num_reset}")
+        #     print(f"[DEBUG] Reset indices (envs): {reset_indices}")
 
         # --- FINAL MAGNET CONDITION ---
         magnet_condition = self._magnet_condition_counter >= self._magnet_required_steps
