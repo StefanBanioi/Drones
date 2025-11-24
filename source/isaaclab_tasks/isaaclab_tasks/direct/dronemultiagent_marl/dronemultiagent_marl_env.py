@@ -14,6 +14,7 @@ import numpy as np
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectMARLEnv
+from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import sample_uniform
 from isaaclab.utils.math import subtract_frame_transforms
@@ -139,16 +140,22 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._episode_sums = {
             key: torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
             for key in [
-                "lin_vel_penalty",
-                "ang_vel_penalty",
-                "distance_reward",
-                "distance_reward_ur10",
-                "smooth_landing_bonus",
-                "proximity_bonus",
-                "time_shaping_reward",
+                # Drone-centric
+                "lin_vel",
+                "ang_vel",
+                "distance_to_goal",
+                "smooth_landing",
+                "proximity",
+                "time_shaping",
+                "alignment_reward",
+                "magnet_reward",
+
+                # UR10-centric
                 "orientation_reward",
-                "died_penalty",
                 "wrist_height_reward", 
+
+                # Shared penalty 
+                "died_penalty",
             ]
         }
 
@@ -267,11 +274,52 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         start_gust = torch.rand(self.num_envs, device=device) < 0.02
         trigger_gust = can_gust & start_gust
 
-        # === 3) Apply forces/torques (respect magnet) ===
-        # Do not start gusts / apply wind on magnetized envs
-        not_magnetized = ~self._magnet_active
+           # === 3) Apply forces/torques with wind (no physical magnet attach) ===
+        dt = self.step_dt
+        device = self.device
+
+        # timers
+        self.wind_timer       -= dt
+        self.wind_cooldown    -= dt
+        self.wind_gust_timer  -= dt
+        self.wind_gust_cooldown -= dt
+
+        # refresh steady wind if needed
+        needs_new_wind = (self.wind_timer <= 0) & (self.wind_cooldown <= 0)
+        if needs_new_wind.any():
+            new_dirs = torch.nn.functional.normalize(
+                torch.randn((self.num_envs, 2), device=device), dim=1
+            )
+            new_strengths = torch.empty(self.num_envs, device=device).uniform_(
+                getattr(self.cfg, "lower_wind_scale", 0.02),
+                getattr(self.cfg, "upper_wind_scale", 0.12),
+            )
+            self.wind_direction[needs_new_wind] = new_dirs[needs_new_wind]
+            self.wind_strength[needs_new_wind]  = new_strengths[needs_new_wind]
+            self.wind_timer[needs_new_wind]     = torch.randint(50, 150, (needs_new_wind.sum(),), device=device) * dt
+            self.wind_cooldown[needs_new_wind]  = torch.randint(100, 300, (needs_new_wind.sum(),), device=device) * dt
+
+        # steady wind force
+        self.wind_force[:, 0, 0] = self.wind_direction[:, 0] * self.wind_strength
+        self.wind_force[:, 0, 1] = self.wind_direction[:, 1] * self.wind_strength
+        self.wind_force[:, 0, 2] = 0.0
+
+        # gust lifecycle
+        self.wind_gust_timer[self.wind_gust_timer <= 0] = 0.0
+        end_gust = self.wind_gust_timer <= 0
+        if end_gust.any():
+            self.active_wind_force[end_gust] = 0.0
+
+        can_gust   = self.wind_gust_cooldown <= 0
+        start_gust = torch.rand(self.num_envs, device=device) < 0.02
+        trigger_gust = can_gust & start_gust
+
+        # OPTIONAL: suppress gusts once the env has "won" (just tracking; no attach)
+        suppress_after_win = getattr(self.cfg, "suppress_gusts_on_win", True)
+        eligible_for_gusts = (~self._winning_condition) if suppress_after_win else torch.ones_like(self._winning_condition)
+
         if trigger_gust.any():
-            tg = trigger_gust & not_magnetized
+            tg = trigger_gust & eligible_for_gusts
             if tg.any():
                 gust_dirs = torch.nn.functional.normalize(torch.randn_like(self.active_wind_force), dim=-1)
                 gust_mags = torch.empty((self.num_envs, 1, 1), device=device).uniform_(0.1, 0.3)
@@ -279,79 +327,17 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                 self.wind_gust_timer[tg]       = torch.randint(15, 40, (tg.sum(),), device=device)  * dt
                 self.wind_gust_cooldown[tg]    = torch.randint(100, 300, (tg.sum(),), device=device) * dt
 
-        # Combine steady wind + gusts for free (non-magnet) envs
-        if not_magnetized.any():
-            env_ids = torch.nonzero(not_magnetized, as_tuple=False).squeeze(-1)
-            combined_wind_force = self.wind_force[env_ids] + self.active_wind_force[env_ids]
-            combined_forces  = self._thrust[env_ids] + combined_wind_force
-            combined_torques = self._moment[env_ids]
+        # apply combined wind + thrust/torque to ALL envs (no "magnetized" split)
+        combined_forces  = self._thrust + (self.wind_force + self.active_wind_force)
+        combined_torques = self._moment
+        self._DroneRobot.set_external_force_and_torque(
+            forces=combined_forces,
+            torques=combined_torques,
+            body_ids=self._body_id
+        )
 
-            self._DroneRobot.set_external_force_and_torque(
-                forces=combined_forces,
-                torques=combined_torques,
-                body_ids=self._body_id
-            )
+            # NOTE: no magnet_offset, no PD attach, no special forces after "win".
 
-        # === 4) Handle new/ongoing magnet attachments ===
-        # Winning flag from reward side:
-        newly_won = self._winning_condition & (~self._magnet_active)
-        if newly_won.any():
-            # mark as magnet-active
-            self._magnet_active = self._magnet_active | newly_won
-
-            # compute and store attachment offset (drone relative to EE at capture)
-            ee_idx = self._Ur10Arm.find_bodies("ee_link")[0]
-            ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_idx, :3]  # [N,3]
-            drone_pos = self._DroneRobot.data.root_pos_w[:, :3]    # [N,3]
-
-            # Per-env offset; allocate if needed
-            if not hasattr(self, "_magnet_offset"):
-                self._magnet_offset = torch.zeros_like(drone_pos)
-
-            self._magnet_offset[newly_won] = (drone_pos - ee_pos)[newly_won]
-
-        # For all magnet-active envs, apply an attachment behavior
-        if self._magnet_active.any():
-            midx = torch.nonzero(self._magnet_active, as_tuple=False).squeeze(-1)
-            ee_idx = self._Ur10Arm.find_bodies("ee_link")[0]
-            ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_idx, :3]  # [N,3]
-            target_pos = ee_pos + getattr(self, "_magnet_offset", 0.0)
-
-            # Spring-damper toward the target (keeps drone glued but stable)
-            kp = getattr(self.cfg, "magnet_kp", 60.0)
-            kd = getattr(self.cfg, "magnet_kd", 6.0)
-
-            drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
-            # If you have world-frame linear velocity, prefer that. Otherwise approximate (body->world transform if available).
-            if hasattr(self._DroneRobot.data, "root_lin_vel_w"):
-                drone_vel = self._DroneRobot.data.root_lin_vel_w[:, :3]
-            else:
-                # fallback: use body-frame vel rotated into world
-                if hasattr(self._DroneRobot.data, "root_lin_vel_b") and hasattr(self._DroneRobot.data, "root_quat_w"):
-                    v_b = self._DroneRobot.data.root_lin_vel_b
-                    q_w = self._DroneRobot.data.root_quat_w
-                    # rotate body vel to world (same quat_apply you use elsewhere)
-                    drone_vel = quat_apply(q_w, v_b)
-                else:
-                    drone_vel = torch.zeros_like(drone_pos)
-
-            pos_err = (target_pos - drone_pos)          # [N,3]
-            vel_err = -drone_vel                        # [N,3]
-            attach_force = kp * pos_err + kd * vel_err  # [N,3]
-            attach_force = attach_force.unsqueeze(1)    # [N,1,3] to match API
-
-            # No wind while attached; thrust can be kept or nulled—keeping a bit helps stability.
-            keep_thrust = getattr(self.cfg, "magnet_keep_thrust", True)
-            base_forces = self._thrust if keep_thrust else torch.zeros_like(self._thrust)
-
-            forces  = base_forces[midx] + attach_force[midx]
-            torques = torch.zeros_like(self._moment[midx])  # keep orientation via arm; or add yaw damping if you like
-
-            self._DroneRobot.set_external_force_and_torque(
-                forces=forces,
-                torques=torques,
-                body_ids=self._body_id
-            )
 
     def _apply_drone_action(self, action: torch.Tensor) -> None:
         """
@@ -616,7 +602,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         if torch.rand(1).item() < 0.05:
             print(f"[DEBUG] dist: {distance_to_goal.mean():.3f}, vel: {lin_vel.mean():.3f}, ang_vel: {ang_vel.mean():.3f}")
             print(f"[DEBUG] drone Z: {self._DroneRobot.data.root_pos_w[:, 2].mean():.3f}")
-            print(f"[DEBUG] ee_link Z: {ee_pos[:, 2].mean():.3f}")
+            print(f"[DEBUG] ee_link Z: {self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies('ee_link')[0], 2].mean():.3f}")
             print(f"[DEBUG] Orientation reward mean: {(orientation_reward * self.step_dt).mean():.3f}")
 
         # Track "landing condition" like single-agent
@@ -705,54 +691,94 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         return terminated, time_outs
 
+
     def _reset_idx(self, env_ids: torch.Tensor | None):
+        # Normalize env_ids to a 1D tensor of indices
         if env_ids is None or len(env_ids) == self.num_envs:
             env_ids = self._DroneRobot._ALL_INDICES
-            
-        # Logging
+
+        device = self.device
+
+        # -----------------------------
+        # Compat layer for termination/timeouts across DirectRLEnv vs DirectMARLEnv
+        # -----------------------------
+        def _get_flag(name_list, default=False):
+            """Try several attribute names; if none found, return a bool tensor (default)."""
+            for nm in name_list:
+                if hasattr(self, nm):
+                    buf = getattr(self, nm)
+                    # Some wrappers store as float {0,1}; coerce to bool
+                    if buf.dtype != torch.bool:
+                        return (buf != 0)
+                    return buf
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=device) if default is False \
+                else torch.ones(self.num_envs, dtype=torch.bool, device=device)
+
+        # Try typical names used by Isaac Lab / wrappers
+        #   - Single-agent DirectRLEnv often had: reset_terminated, reset_time_outs
+        #   - MARL / wrappers often expose: terminated_buf, time_out_buf OR done_buf, timeout_buf
+        terminated_flags = _get_flag(
+            ["reset_terminated", "terminated_buf", "done_buf", "resets_terminated"], default=False
+        )
+        timeout_flags = _get_flag(
+            ["reset_time_outs", "time_out_buf", "timeout_buf", "resets_time_outs"], default=False
+        )
+
+        # -----------------------------
+        # Logging (episode reward sums + metrics)
+        # -----------------------------
         final_distance_to_goal = torch.linalg.norm(
             self._desired_pos_w[env_ids] - self._DroneRobot.data.root_pos_w[env_ids], dim=1
         ).mean()
-        extras = dict()
+
+        extras = {}
         for key in self._episode_sums.keys():
             episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
             extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
             self._episode_sums[key][env_ids] = 0.0
+
+        # Per-episode termination counts (robust to missing flags)
+        extras["Episode_Termination/died"] = torch.count_nonzero(terminated_flags[env_ids]).item()
+        extras["Episode_Termination/time_out"] = torch.count_nonzero(timeout_flags[env_ids]).item()
+        extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
+
         self.extras["log"] = dict()
         self.extras["log"].update(extras)
-        extras = dict()
-        extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
-        extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
-        extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
-        self.extras["log"].update(extras)
 
-        # === Finalize episode outcome at reset ===
+        # -----------------------------
+        # Finalize episode outcome at reset
+        # -----------------------------
+        # Ensure status buffers exist
+        if not hasattr(self, "_success_status"):
+            self._success_status = torch.zeros(self.num_envs, dtype=torch.int32, device=device)
+        if not hasattr(self, "_episode_success_flags"):
+            self._episode_success_flags = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+        if not hasattr(self, "_winning_condition"):
+            self._winning_condition = torch.zeros(self.num_envs, dtype=torch.bool, device=device)
+
         # Reset status for selected envs
         self._success_status[env_ids] = 0
 
-        # Mark environments that successfully landed during the episode
+        # Mark successes
         success_env_ids = env_ids[self._episode_success_flags[env_ids]]
         self._success_status[success_env_ids] = 1
 
-        # Mark environments that got close enough that the magnet condition was met
         magnet_env_ids = env_ids[self._winning_condition[env_ids]]
-        self._success_status[magnet_env_ids] = 2  # Treat magnet condition as a superior success condition
+        self._success_status[magnet_env_ids] = 2  # magnet success > landing
 
-        # Crashed environments (terminated)
-        crash_env_ids = env_ids[self.reset_terminated[env_ids]]
+        # Crashes / timeouts (use compat flags)
+        crash_env_ids = env_ids[terminated_flags[env_ids]]
         self._success_status[crash_env_ids] = -1
 
-        # Timed out environments that never landed = failure (-2)
-        timeout_env_ids = env_ids[self.reset_time_outs[env_ids]]
+        timeout_env_ids = env_ids[timeout_flags[env_ids]]
         timeout_failed_env_ids = timeout_env_ids[~self._episode_success_flags[timeout_env_ids]]
         self._success_status[timeout_failed_env_ids] = -2
 
-        # Reset the flags so next episode can track success again
+        # Clear per-episode flags for these envs
         self._episode_success_flags[env_ids] = False
         self._winning_condition[env_ids] = False
 
-
-        # === Log total success/failure counts ===
+        # Aggregate counts for logs
         success_count = torch.sum(self._success_status[env_ids] == 1).item()
         magnet_was_success_count = torch.sum(self._success_status[env_ids] == 2).item()
         crash_count = torch.sum(self._success_status[env_ids] == -1).item()
@@ -763,55 +789,199 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self.extras["log"]["Episode_Success/crash"] = crash_count
         self.extras["log"]["Episode_Success/timeout"] = timeout_count
 
-
-        # Reset the robotDrone 
+        # -----------------------------
+        # Reset actors
+        # -----------------------------
         self._DroneRobot.reset(env_ids)
-        # Reset the UR10 arm
         self._Ur10Arm.reset(env_ids)
-        # Reset the magnet 
-        self._winning_condition[env_ids] = False
-       
 
+        # Also reset magnet-active flags if you maintain one
+        if hasattr(self, "_magnet_active"):
+            self._magnet_active[env_ids] = False
+
+        # Base class reset (handles buffers like episode_length_buf, etc.)
         super()._reset_idx(env_ids)
         if len(env_ids) == self.num_envs:
-            # Spread out the resets to avoid spikes in training when many environments reset at a similar time
+            # Spread out resets to avoid spikes
             self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
 
-        self._actions[env_ids] = 0.0
+        # -----------------------------
+        # Zero actions per agent (MARL-safe)
+        # -----------------------------
+        if isinstance(self._actions, dict):
+            for k in self._actions.keys():
+                self._actions[k][env_ids] = 0.0
+        else:
+            # Fallback if wrapper stacks into a single tensor
+            self._actions[env_ids] = 0.0
 
         # -----------------------------
-        # Randomize robotDrone initial position
+        # Randomize initial states
         # -----------------------------
+        # Drone
         joint_pos = self._DroneRobot.data.default_joint_pos[env_ids]
         joint_vel = self._DroneRobot.data.default_joint_vel[env_ids]
         default_root_state = self._DroneRobot.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # X
-        default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # Y
-        default_root_state[:, 2] += torch.zeros(len(env_ids)).uniform_(0.0, 0.5).to(default_root_state.device)   # Z
+        default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
+        default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
+        default_root_state[:, 2] += torch.zeros(len(env_ids), device=device).uniform_(0.0, 0.5)
 
         self._DroneRobot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._DroneRobot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._DroneRobot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # -----------------------------
-        # Randomize UR10 initial position
-        # -----------------------------
+        # UR10
         joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids]
         joint_vel = self._Ur10Arm.data.default_joint_vel[env_ids]
         default_root_state = self._Ur10Arm.data.default_root_state[env_ids]
         default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # X
-        default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # Y
+        default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+        default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
 
         self._Ur10Arm.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self._Ur10Arm.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self._Ur10Arm.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # def _reset_idx(self, env_ids: torch.Tensor | None):
+    #     if env_ids is None or len(env_ids) == self.num_envs:
+    #         env_ids = self._DroneRobot._ALL_INDICES
+            
+    #     # Logging
+    #     final_distance_to_goal = torch.linalg.norm(
+    #         self._desired_pos_w[env_ids] - self._DroneRobot.data.root_pos_w[env_ids], dim=1
+    #     ).mean()
+    #     extras = dict()
+    #     for key in self._episode_sums.keys():
+    #         episodic_sum_avg = torch.mean(self._episode_sums[key][env_ids])
+    #         extras["Episode_Reward/" + key] = episodic_sum_avg / self.max_episode_length_s
+    #         self._episode_sums[key][env_ids] = 0.0
+    #     self.extras["log"] = dict()
+    #     self.extras["log"].update(extras)
+    #     extras = dict()
+    #     extras["Episode_Termination/died"] = torch.count_nonzero(self.reset_terminated[env_ids]).item()
+    #     extras["Episode_Termination/time_out"] = torch.count_nonzero(self.reset_time_outs[env_ids]).item()
+    #     extras["Metrics/final_distance_to_goal"] = final_distance_to_goal.item()
+    #     self.extras["log"].update(extras)
+
+    #     # === Finalize episode outcome at reset ===
+    #     # Reset status for selected envs
+    #     self._success_status[env_ids] = 0
+
+    #     # Mark environments that successfully landed during the episode
+    #     success_env_ids = env_ids[self._episode_success_flags[env_ids]]
+    #     self._success_status[success_env_ids] = 1
+
+    #     # Mark environments that got close enough that the magnet condition was met
+    #     magnet_env_ids = env_ids[self._winning_condition[env_ids]]
+    #     self._success_status[magnet_env_ids] = 2  # Treat magnet condition as a superior success condition
+
+    #     # Crashed environments (terminated)
+    #     crash_env_ids = env_ids[self.reset_terminated[env_ids]]
+    #     self._success_status[crash_env_ids] = -1
+
+    #     # Timed out environments that never landed = failure (-2)
+    #     timeout_env_ids = env_ids[self.reset_time_outs[env_ids]]
+    #     timeout_failed_env_ids = timeout_env_ids[~self._episode_success_flags[timeout_env_ids]]
+    #     self._success_status[timeout_failed_env_ids] = -2
+
+    #     # Reset the flags so next episode can track success again
+    #     self._episode_success_flags[env_ids] = False
+    #     self._winning_condition[env_ids] = False
+
+
+    #     # === Log total success/failure counts ===
+    #     success_count = torch.sum(self._success_status[env_ids] == 1).item()
+    #     magnet_was_success_count = torch.sum(self._success_status[env_ids] == 2).item()
+    #     crash_count = torch.sum(self._success_status[env_ids] == -1).item()
+    #     timeout_count = torch.sum(self._success_status[env_ids] == -2).item()
+
+    #     self.extras["log"]["Episode_Success/success"] = success_count
+    #     self.extras["log"]["Episode_Success/magnet"] = magnet_was_success_count
+    #     self.extras["log"]["Episode_Success/crash"] = crash_count
+    #     self.extras["log"]["Episode_Success/timeout"] = timeout_count
+
+
+    #     # Reset the robotDrone 
+    #     self._DroneRobot.reset(env_ids)
+    #     # Reset the UR10 arm
+    #     self._Ur10Arm.reset(env_ids)
+    #     # Reset the magnet 
+    #     self._winning_condition[env_ids] = False
+       
+
+    #     super()._reset_idx(env_ids)
+    #     if len(env_ids) == self.num_envs:
+    #         # Spread out the resets to avoid spikes in training when many environments reset at a similar time
+    #         self.episode_length_buf = torch.randint_like(self.episode_length_buf, high=int(self.max_episode_length))
+
+    #     self._actions[env_ids] = 0.0
+
+    #     # -----------------------------
+    #     # Randomize robotDrone initial position
+    #     # -----------------------------
+    #     joint_pos = self._DroneRobot.data.default_joint_pos[env_ids]
+    #     joint_vel = self._DroneRobot.data.default_joint_vel[env_ids]
+    #     default_root_state = self._DroneRobot.data.default_root_state[env_ids]
+    #     default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+    #     default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # X
+    #     default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.5, 0.5).to(default_root_state.device)  # Y
+    #     default_root_state[:, 2] += torch.zeros(len(env_ids)).uniform_(0.0, 0.5).to(default_root_state.device)   # Z
+
+    #     self._DroneRobot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+    #     self._DroneRobot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+    #     self._DroneRobot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+    #     # -----------------------------
+    #     # Randomize UR10 initial position
+    #     # -----------------------------
+    #     joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids]
+    #     joint_vel = self._Ur10Arm.data.default_joint_vel[env_ids]
+    #     default_root_state = self._Ur10Arm.data.default_root_state[env_ids]
+    #     default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+    #     default_root_state[:, 0] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # X
+    #     default_root_state[:, 1] += torch.zeros(len(env_ids)).uniform_(-0.2, 0.2).to(default_root_state.device)  # Y
+
+    #     self._Ur10Arm.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+    #     self._Ur10Arm.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+    #     self._Ur10Arm.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
     
-        #obs = self._get_observations()
-        # print(f"[RESET DEBUG] DroneRobot observation shape: {obs['_DroneRobot'].shape}")
-        # print(f"[RESET DEBUG] UR10 Arm observation shape: {obs['_Ur10Arm'].shape}")
+    #     #obs = self._get_observations()
+    #     # print(f"[RESET DEBUG] DroneRobot observation shape: {obs['_DroneRobot'].shape}")
+    #     # print(f"[RESET DEBUG] UR10 Arm observation shape: {obs['_Ur10Arm'].shape}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def _set_debug_vis_impl(self, debug_vis: bool):
             # create markers if necessary for the first tome

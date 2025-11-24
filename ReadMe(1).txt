@@ -64,6 +64,25 @@ Notes: "--num_env 10" is a simulation parameter where 10 is the number of parall
 
 Add --headless if you want to run the experiment without GUI.
 
+
+== HOW TO USE A CHECKPOINT == 
+
+If you already trained a model and its quite good and maybe you just want to continue working from that point onwards, use a checkpoint load for the next training session. 
+Here's how to do it. 
+
+Say you have this agent that you trained until the end and got this as the best agent: 
+-> "C:\Users\UMRobotics\Desktop\IsaacLab\logs\skrl\Arm_Drone_Communication\2025-09-26_17-47-16_ppo_torch\checkpoints\best_agent.pt"
+
+How do you continue from this? 
+
+USE : --checkpoint /PATH/TO/model.pth at the end of your command line
+
+You'll have something like this:
+
+skrl\train.py -- 'Your task' --num_env 'Number of environments' --headless 'With or without GUI' --checkpoint 'Your already trained model : /PATH/TO/model.pth'
+
+This will use the already trained model and continue working from it. 
+
 == VISUALIZATION WITH TENSORBOARD ==
 
 If not already installed:
@@ -78,7 +97,9 @@ Then run:
 
     tensorboard --logdir "C:\Users\UMRobotics\Desktop\IsaacLab\logs\skrl\Arm_Drone_Communication\2025-09-18_14-25-43_ppo_torch"
     	
-	^^ This command will then show you how your agent trained and how the rewards changed as the training went on. 
+	^^ This command will then show you how your agent trained and how the rewards changed as the training went on.
+
+Note: You can also view your agent performance live with the bottom command. These commands work for both the single and multiagent as long as you change the "C:\..." to the correct one :D 
 
 Make sure to replace the path with your actual log directory (single agent/ multi agent.
 

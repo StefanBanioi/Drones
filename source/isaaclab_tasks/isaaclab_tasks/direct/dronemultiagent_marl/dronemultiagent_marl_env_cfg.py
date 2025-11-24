@@ -140,10 +140,10 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     wrist_height_penalty_scale = 0 #-180       # Penalize wrists being too low
 
     # punishments    
-    lin_vel_reward_scale = 1.5            #we actually want to incurage speed #-0.05           # Penalize high linear velocity (drone)
-    ang_vel_reward_scale = -0.10           # Penalize angular velocity (drone)
+    lin_vel_reward_scale = 0              # Penalize high linear velocity (drone) used to be 1.5 ->10
+    ang_vel_reward_scale = -0.1            # Penalize angular velocity (drone)   used to be -0.1 -> 1.10
     time_penalty = -0.01                   # Per-step penalty to encourage speed
-    died_penalty = -100.0                  # Penalty for going out of bounds
+    died_penalty = 0.0                   # Penalty for going out of bounds used to be -100.0 -> -10.0
 
 
     #distance_to_goal_reward_scale = 300.0        
