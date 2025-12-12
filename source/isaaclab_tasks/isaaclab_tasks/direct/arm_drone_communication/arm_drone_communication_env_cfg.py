@@ -59,9 +59,9 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=5.0, replicate_physics=True)
     # robotDrone
-    #robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    robotDrone: ArticulationCfg = CRAZYFLIE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     #robotDrone: ArticulationCfg = VERTEX_ONE_CFG.replace(prim_path="/World/VertexOne")
-    robotDrone: ArticulationCfg = VERTEX_ONE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+    #robotDrone: ArticulationCfg = VERTEX_ONE_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     
         # Robots
     thrust_to_weight = 1.9
@@ -139,13 +139,13 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
                      
 
     
-    # wind scale for no wind 
-    lower_wind_scale = 0.0
-    upper_wind_scale = 0.0 
+    # # wind scale for no wind 
+    # lower_wind_scale = 0.0
+    # upper_wind_scale = 0.0 
 
-    # # wind scale for wind
-    # lower_wind_scale = 0.1
-    # upper_wind_scale = 0.2
+    # wind scale for wind
+    lower_wind_scale = 0.1
+    upper_wind_scale = 0.2
 
 
     # # wind scale for medium wind
@@ -209,7 +209,7 @@ class ArmDroneCommunicationEnvCfg(DirectRLEnvCfg):
 
     # punishments    
     lin_vel_reward_scale = 0.0                   
-    ang_vel_reward_scale = 2.5 #From -0.1 to -1.0  to -0.3   (Increased to 2.5 as I do want the drone to actually have some tilt)            
+    ang_vel_reward_scale = -1.0 #From -0.1 to -1.0  to -0.3   (Increased to 2.5 as I do want the drone to actually have some tilt)            
     died_penalty = -100.0                        
 
     # Old wind scale for testing with old drone. Triple the conditions for the new bigger drone

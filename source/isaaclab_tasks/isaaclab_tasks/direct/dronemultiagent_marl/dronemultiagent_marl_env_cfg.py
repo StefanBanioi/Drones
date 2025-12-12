@@ -170,13 +170,13 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     approach_zone = 0.90  # Distance at which the drone is considered close enough to the arm's end-effector (90 cm)
     alignment_threshold = 0.70  # Cosine similarity threshold for alignment (0.70 corresponds to ~45° angle (arccos(0.70) ≈ 45°))  ~45.572996 degrees
 
-        # wind scale for no wind 
-    lower_wind_scale = 0.0
-    upper_wind_scale = 0.0 
+    # # wind scale for no wind 
+    # lower_wind_scale = 0.0
+    # upper_wind_scale = 0.0 
 
-    # # wind scale for wind
-    # lower_wind_scale = 0.1
-    # upper_wind_scale = 0.2
+    # wind scale for wind
+    lower_wind_scale = 0.1
+    upper_wind_scale = 0.2
 
 
     # # wind scale for medium wind
