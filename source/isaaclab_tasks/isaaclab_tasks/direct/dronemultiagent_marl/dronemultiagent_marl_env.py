@@ -45,6 +45,55 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self.wind_gust_cooldown = torch.zeros(self.num_envs, device=self.device)      # cooldown before next gust
         self.active_wind_force = torch.zeros((self.num_envs, 1, 3), device=self.device)  # actual force applied
         
+
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+
+        # Toggle
+        self.RealisticWindYesOrNo = getattr(self.cfg, "RealisticWindYesOrNo", True)
+
+        # Wind model parameters (put these in cfg if you want)
+        self.wind_vmin = getattr(self.cfg, "wind_speed_min", self.cfg.lower_wind_scale)
+        self.wind_vmax = getattr(self.cfg, "wind_speed_max", self.cfg.upper_wind_scale)
+
+        # Option A: max turning rate (rad/s)
+        self.wind_max_yaw_rate = math.radians(getattr(self.cfg, "wind_max_yaw_rate_deg", 25.0))
+
+        # Option B: cone half-angle (rad) + how often we choose a new target
+        self.wind_cone_half_angle = math.radians(getattr(self.cfg, "wind_cone_half_angle_deg", 35.0))
+        self.wind_update_interval = getattr(self.cfg, "wind_update_interval_s", 2.0)
+
+        # Smoothing time-constants (both A & B can use these)
+        self.wind_dir_tau = getattr(self.cfg, "wind_direction_tau_s", 0.7)
+        self.wind_speed_tau = getattr(self.cfg, "wind_speed_tau_s", 0.9)
+
+        # Persistent wind state (2D direction stored as yaw)
+        self._wind_yaw = torch.empty(self.num_envs, device=self.device).uniform_(-math.pi, math.pi)
+        self._wind_speed = torch.empty(self.num_envs, device=self.device).uniform_(self.wind_vmin, self.wind_vmax)
+
+        # For option B target-hold behavior
+        self._wind_target_yaw = self._wind_yaw.clone()
+        self._wind_target_speed = self._wind_speed.clone()
+        self._wind_time_to_update = torch.empty(self.num_envs, device=self.device).uniform_(0.0, self.wind_update_interval)
+
+        # Global time for noise
+        self._wind_time = torch.tensor(0.0, device=self.device)
+
+        # Per-env offsets/seeds so all envs don't get identical noise
+        self._wind_noise_seed = torch.randint(
+            low=0, high=2**31-1, size=(self.num_envs,), device=self.device, dtype=torch.int64
+        )
+        self._wind_noise_offset = torch.empty(self.num_envs, device=self.device).uniform_(0.0, 1000.0)
+
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+        #_______________________________________________________________________________________________________
+
         self._magnet_active = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device) # Magnetic capture condition active
         
         # Magnet condition tracking with the second counter 
@@ -203,6 +252,127 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         # Try a fixed position for the goal 
         self._desired_pos_w = ee_pos.squeeze(1)  # Update the dynamic goal position
+    #____________________________________________________________________________#
+    #____________________________________________________________________________#
+    #_______________________THESE_ARE_HELPER_FUNCTIONS___________________________#
+    #____________________________________________________________________________#
+    #____________________________________________________________________________#
+
+    def _wrap_pi(self, a: torch.Tensor) -> torch.Tensor:
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _angle_diff(self, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        # shortest signed difference b-a in [-pi, pi]
+        return self._wrap_pi(b - a)
+
+    def _exp_smooth_alpha(self, dt: float, tau: float) -> float:
+        # stable smoothing factor (0..1)
+        if tau <= 1e-6:
+            return 1.0
+        return float(1.0 - math.exp(-dt / tau))
+
+    def _hash_u01(self, i: torch.Tensor, seed: torch.Tensor) -> torch.Tensor:
+        # splitmix64-style with signed int64 constants
+        c1 = -7046029254386353131  # 0x9E3779B97F4A7C15 as int64
+        c2 = -4658895280553007687  # 0xBF58476D1CE4E5B9 as int64
+        c3 = -7723592293110705685  # 0x94D049BB133111EB as int64
+
+        x = i.to(torch.int64) ^ (seed.to(torch.int64) * c1)
+        x = (x ^ (x >> 30)) * c2
+        x = (x ^ (x >> 27)) * c3
+        x = x ^ (x >> 31)
+
+        return (x & 0xFFFFFFFF).to(torch.float32) / 2**32
+
+
+    def _value_noise_1d(self, t: torch.Tensor, seed: torch.Tensor, freq: float) -> torch.Tensor:
+        # t: [N] float, seed: [N] int64
+        x = t * freq
+        i0 = torch.floor(x).to(torch.int64)
+        f = (x - i0.to(x.dtype)).clamp(0.0, 1.0)
+        # smoothstep
+        u = f * f * (3.0 - 2.0 * f)
+        v0 = self._hash_u01(i0, seed)
+        v1 = self._hash_u01(i0 + 1, seed)
+        v = v0 * (1.0 - u) + v1 * u
+        return v * 2.0 - 1.0  # [-1, 1]
+
+    def _fbm_1d(self, t: torch.Tensor, seed: torch.Tensor, base_freq: float, octaves: int = 3) -> torch.Tensor:
+        # fractal noise sum for richer motion
+        out = torch.zeros_like(t)
+        amp = 1.0
+        freq = base_freq
+        norm = 0.0
+        for k in range(octaves):
+            out = out + amp * self._value_noise_1d(t, seed + k * 1013, freq)
+            norm += amp
+            amp *= 0.5
+            freq *= 2.0
+        return out / max(norm, 1e-6)
+
+    def _update_wind_realistic(self, dt: float):
+        # Noise-driven TURN RATES + integrate yaw (prevents big flips automatically)
+        self._wind_time += dt
+        t = self._wind_time + self._wind_noise_offset  # [N]
+
+        # yaw rate noise (slow)
+        yaw_rate_n = self._fbm_1d(t, self._wind_noise_seed, base_freq=0.08, octaves=3)  # [-1,1]
+        yaw_rate = yaw_rate_n * self.wind_max_yaw_rate  # rad/s
+
+        # integrate yaw
+        self._wind_yaw = self._wrap_pi(self._wind_yaw + yaw_rate * dt)
+
+        # speed noise (even slower)
+        speed_n = self._fbm_1d(t + 17.3, self._wind_noise_seed, base_freq=0.04, octaves=3)  # [-1,1]
+        target_speed = self.wind_vmin + (speed_n + 1.0) * 0.5 * (self.wind_vmax - self.wind_vmin)
+
+        # smooth speed a bit (optional, but looks nicer)
+        a_v = self._exp_smooth_alpha(dt, self.wind_speed_tau)
+        self._wind_speed = self._wind_speed + a_v * (target_speed - self._wind_speed)
+
+    def _update_wind_cone(self, dt: float):
+        # “change every few seconds” but stay within cone around previous direction
+        self._wind_time += dt
+        self._wind_time_to_update -= dt
+
+        needs = self._wind_time_to_update <= 0.0
+        if needs.any():
+            # new target within cone: delta in [-cone, +cone]
+            t = (self._wind_time + self._wind_noise_offset)[needs]
+            seed = self._wind_noise_seed[needs]
+
+            delta_n = self._fbm_1d(t, seed, base_freq=0.12, octaves=2)  # [-1,1]
+            delta = delta_n * self.wind_cone_half_angle
+
+            self._wind_target_yaw[needs] = self._wrap_pi(self._wind_yaw[needs] + delta)
+
+            speed_n = self._fbm_1d(t + 33.7, seed, base_freq=0.07, octaves=2)
+            self._wind_target_speed[needs] = self.wind_vmin + (speed_n + 1.0) * 0.5 * (self.wind_vmax - self.wind_vmin)
+
+            # reset timer
+            self._wind_time_to_update[needs] = self.wind_update_interval
+
+        # smooth toward targets
+        a_dir = self._exp_smooth_alpha(dt, self.wind_dir_tau)
+        a_spd = self._exp_smooth_alpha(dt, self.wind_speed_tau)
+
+        dtheta = self._angle_diff(self._wind_yaw, self._wind_target_yaw)
+        self._wind_yaw = self._wrap_pi(self._wind_yaw + a_dir * dtheta)
+        self._wind_speed = self._wind_speed + a_spd * (self._wind_target_speed - self._wind_speed)
+
+    def _update_wind(self, dt: float):
+        if self.RealisticWindYesOrNo:
+            self._update_wind_realistic(dt)
+        else:
+            self._update_wind_cone(dt)
+
+        # write back to your existing buffers (direction + strength)
+        self.wind_direction[:, 0] = torch.cos(self._wind_yaw)
+        self.wind_direction[:, 1] = torch.sin(self._wind_yaw)
+        self.wind_strength[:] = self._wind_speed  # keep your naming; it's your force scale
+
+
+
 
     def _apply_action(self) -> None:
         """
@@ -232,100 +402,134 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._Ur10Arm.set_joint_position_target(self.arm_curr_targets)
         self.arm_prev_targets = self.arm_curr_targets.clone()
 
-        # === 2) Wind & gusts (ported from single-agent) ===
+        # # === 2) Wind & gusts (ported from single-agent) ===
+        # dt = self.step_dt
+        # device = self.device
+
+        # # decrement timers
+        # self.wind_timer       -= dt
+        # self.wind_cooldown    -= dt
+        # self.wind_gust_timer  -= dt
+        # self.wind_gust_cooldown -= dt
+
+        # # New steady-wind samples if needed
+        # needs_new_wind = (self.wind_timer <= 0) & (self.wind_cooldown <= 0)
+        # if needs_new_wind.any():
+        #     new_dirs = torch.nn.functional.normalize(
+        #         torch.randn((self.num_envs, 2), device=device), dim=1
+        #     )
+        #     new_strengths = torch.empty(self.num_envs, device=device).uniform_(
+        #         getattr(self.cfg, "lower_wind_scale", 0.02),
+        #         getattr(self.cfg, "upper_wind_scale", 0.12),
+        #     )
+        #     self.wind_direction[needs_new_wind] = new_dirs[needs_new_wind]
+        #     self.wind_strength[needs_new_wind]  = new_strengths[needs_new_wind]
+
+        #     # durations/cooldowns in steps * dt (kept same spirit as your single-agent)
+        #     self.wind_timer[needs_new_wind]    = torch.randint(50, 150, (needs_new_wind.sum(),), device=device)  * dt
+        #     self.wind_cooldown[needs_new_wind] = torch.randint(100, 300, (needs_new_wind.sum(),), device=device) * dt
+
+        # # Build steady wind force (xy only)
+        # self.wind_force[:, 0, 0] = self.wind_direction[:, 0] * self.wind_strength
+        # self.wind_force[:, 0, 1] = self.wind_direction[:, 1] * self.wind_strength
+        # self.wind_force[:, 0, 2] = 0.0
+
+        # # End active gusts if their timer ran out
+        # gust_end = self.wind_gust_timer <= 0
+        # if gust_end.any():
+        #     self.active_wind_force[gust_end] = 0.0
+
+        # # Potentially trigger new gusts (2% / step) if cooldown is over
+        # can_gust   = self.wind_gust_cooldown <= 0
+        # start_gust = torch.rand(self.num_envs, device=device) < 0.02
+        # trigger_gust = can_gust & start_gust
+
+        #    # === 3) Apply forces/torques with wind (no physical magnet attach) ===
+        # dt = self.step_dt
+        # device = self.device
+
+        # # timers
+        # self.wind_timer       -= dt
+        # self.wind_cooldown    -= dt
+        # self.wind_gust_timer  -= dt
+        # self.wind_gust_cooldown -= dt
+
+        # # refresh steady wind if needed
+        # needs_new_wind = (self.wind_timer <= 0) & (self.wind_cooldown <= 0)
+        # if needs_new_wind.any():
+        #     new_dirs = torch.nn.functional.normalize(
+        #         torch.randn((self.num_envs, 2), device=device), dim=1
+        #     )
+        #     new_strengths = torch.empty(self.num_envs, device=device).uniform_(
+        #         getattr(self.cfg, "lower_wind_scale", 0.02),
+        #         getattr(self.cfg, "upper_wind_scale", 0.12),
+        #     )
+        #     self.wind_direction[needs_new_wind] = new_dirs[needs_new_wind]
+        #     self.wind_strength[needs_new_wind]  = new_strengths[needs_new_wind]
+        #     self.wind_timer[needs_new_wind]     = torch.randint(50, 150, (needs_new_wind.sum(),), device=device) * dt
+        #     self.wind_cooldown[needs_new_wind]  = torch.randint(100, 300, (needs_new_wind.sum(),), device=device) * dt
+
+        # # steady wind force
+        # self.wind_force[:, 0, 0] = self.wind_direction[:, 0] * self.wind_strength
+        # self.wind_force[:, 0, 1] = self.wind_direction[:, 1] * self.wind_strength
+        # self.wind_force[:, 0, 2] = 0.0
+
+        # # gust lifecycle
+        # self.wind_gust_timer[self.wind_gust_timer <= 0] = 0.0
+        # end_gust = self.wind_gust_timer <= 0
+        # if end_gust.any():
+        #     self.active_wind_force[end_gust] = 0.0
+
+        # can_gust   = self.wind_gust_cooldown <= 0
+        # start_gust = torch.rand(self.num_envs, device=device) < 0.02
+        # trigger_gust = can_gust & start_gust
+
+        # # OPTIONAL: suppress gusts once the env has "won" (just tracking; no attach)
+        # suppress_after_win = getattr(self.cfg, "suppress_gusts_on_win", True)
+        # eligible_for_gusts = (~self._winning_condition) if suppress_after_win else torch.ones_like(self._winning_condition)
+
+        # if trigger_gust.any():
+        #     tg = trigger_gust & eligible_for_gusts
+        #     if tg.any():
+        #         gust_dirs = torch.nn.functional.normalize(torch.randn_like(self.active_wind_force), dim=-1)
+        #         gust_mags = torch.empty((self.num_envs, 1, 1), device=device).uniform_(0.1, 0.3)
+        #         self.active_wind_force[tg]     = gust_dirs[tg] * gust_mags[tg]
+        #         self.wind_gust_timer[tg]       = torch.randint(15, 40, (tg.sum(),), device=device)  * dt
+        #         self.wind_gust_cooldown[tg]    = torch.randint(100, 300, (tg.sum(),), device=device) * dt
+        # === Wind (Option A or B) ===
         dt = self.step_dt
         device = self.device
 
-        # decrement timers
-        self.wind_timer       -= dt
-        self.wind_cooldown    -= dt
-        self.wind_gust_timer  -= dt
-        self.wind_gust_cooldown -= dt
+        self._update_wind(dt)  # <-- calls option A or B depending on RealisticWindYesOrNo
 
-        # New steady-wind samples if needed
-        needs_new_wind = (self.wind_timer <= 0) & (self.wind_cooldown <= 0)
-        if needs_new_wind.any():
-            new_dirs = torch.nn.functional.normalize(
-                torch.randn((self.num_envs, 2), device=device), dim=1
-            )
-            new_strengths = torch.empty(self.num_envs, device=device).uniform_(
-                getattr(self.cfg, "lower_wind_scale", 0.02),
-                getattr(self.cfg, "upper_wind_scale", 0.12),
-            )
-            self.wind_direction[needs_new_wind] = new_dirs[needs_new_wind]
-            self.wind_strength[needs_new_wind]  = new_strengths[needs_new_wind]
-
-            # durations/cooldowns in steps * dt (kept same spirit as your single-agent)
-            self.wind_timer[needs_new_wind]    = torch.randint(50, 150, (needs_new_wind.sum(),), device=device)  * dt
-            self.wind_cooldown[needs_new_wind] = torch.randint(100, 300, (needs_new_wind.sum(),), device=device) * dt
-
-        # Build steady wind force (xy only)
+        # build steady wind force (xy only)
         self.wind_force[:, 0, 0] = self.wind_direction[:, 0] * self.wind_strength
         self.wind_force[:, 0, 1] = self.wind_direction[:, 1] * self.wind_strength
         self.wind_force[:, 0, 2] = 0.0
 
-        # End active gusts if their timer ran out
-        gust_end = self.wind_gust_timer <= 0
-        if gust_end.any():
-            self.active_wind_force[gust_end] = 0.0
-
-        # Potentially trigger new gusts (2% / step) if cooldown is over
-        can_gust   = self.wind_gust_cooldown <= 0
-        start_gust = torch.rand(self.num_envs, device=device) < 0.02
-        trigger_gust = can_gust & start_gust
-
-           # === 3) Apply forces/torques with wind (no physical magnet attach) ===
-        dt = self.step_dt
-        device = self.device
-
-        # timers
-        self.wind_timer       -= dt
-        self.wind_cooldown    -= dt
-        self.wind_gust_timer  -= dt
+        # === Gusts ===
+        self.wind_gust_timer -= dt
         self.wind_gust_cooldown -= dt
 
-        # refresh steady wind if needed
-        needs_new_wind = (self.wind_timer <= 0) & (self.wind_cooldown <= 0)
-        if needs_new_wind.any():
-            new_dirs = torch.nn.functional.normalize(
-                torch.randn((self.num_envs, 2), device=device), dim=1
-            )
-            new_strengths = torch.empty(self.num_envs, device=device).uniform_(
-                getattr(self.cfg, "lower_wind_scale", 0.02),
-                getattr(self.cfg, "upper_wind_scale", 0.12),
-            )
-            self.wind_direction[needs_new_wind] = new_dirs[needs_new_wind]
-            self.wind_strength[needs_new_wind]  = new_strengths[needs_new_wind]
-            self.wind_timer[needs_new_wind]     = torch.randint(50, 150, (needs_new_wind.sum(),), device=device) * dt
-            self.wind_cooldown[needs_new_wind]  = torch.randint(100, 300, (needs_new_wind.sum(),), device=device) * dt
-
-        # steady wind force
-        self.wind_force[:, 0, 0] = self.wind_direction[:, 0] * self.wind_strength
-        self.wind_force[:, 0, 1] = self.wind_direction[:, 1] * self.wind_strength
-        self.wind_force[:, 0, 2] = 0.0
-
-        # gust lifecycle
-        self.wind_gust_timer[self.wind_gust_timer <= 0] = 0.0
         end_gust = self.wind_gust_timer <= 0
         if end_gust.any():
             self.active_wind_force[end_gust] = 0.0
 
-        can_gust   = self.wind_gust_cooldown <= 0
-        start_gust = torch.rand(self.num_envs, device=device) < 0.02
-        trigger_gust = can_gust & start_gust
+        can_gust = self.wind_gust_cooldown <= 0
+        trigger_gust = can_gust & (torch.rand(self.num_envs, device=device) < 0.02)
 
-        # OPTIONAL: suppress gusts once the env has "won" (just tracking; no attach)
         suppress_after_win = getattr(self.cfg, "suppress_gusts_on_win", True)
-        eligible_for_gusts = (~self._winning_condition) if suppress_after_win else torch.ones_like(self._winning_condition)
+        eligible = (~self._winning_condition) if suppress_after_win else torch.ones_like(self._winning_condition)
 
         if trigger_gust.any():
-            tg = trigger_gust & eligible_for_gusts
+            tg = trigger_gust & eligible
             if tg.any():
                 gust_dirs = torch.nn.functional.normalize(torch.randn_like(self.active_wind_force), dim=-1)
                 gust_mags = torch.empty((self.num_envs, 1, 1), device=device).uniform_(0.1, 0.3)
-                self.active_wind_force[tg]     = gust_dirs[tg] * gust_mags[tg]
-                self.wind_gust_timer[tg]       = torch.randint(15, 40, (tg.sum(),), device=device)  * dt
-                self.wind_gust_cooldown[tg]    = torch.randint(100, 300, (tg.sum(),), device=device) * dt
+                self.active_wind_force[tg] = gust_dirs[tg] * gust_mags[tg]
+                self.wind_gust_timer[tg] = torch.randint(15, 40, (tg.sum(),), device=device) * dt
+                self.wind_gust_cooldown[tg] = torch.randint(100, 300, (tg.sum(),), device=device) * dt
+
 
         # apply combined wind + thrust/torque to ALL envs (no "magnetized" split)
         combined_forces  = self._thrust + (self.wind_force + self.active_wind_force)
@@ -353,8 +557,8 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._thrust[:, 0, 2] = self.cfg.thrust_to_weight * self._robot_weight * (action[:, 0] + 1.0) / 2.0
         self._moment[:, 0, :] = self.cfg.moment_scale * action[:, 1:4]
 
-        # Apply force and torque
-        self._DroneRobot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
+        # # Apply force and torque
+        # self._DroneRobot.set_external_force_and_torque(self._thrust, self._moment, body_ids=self._body_id)
 
     def _apply_ur10_action(self, action: torch.Tensor) -> None:
         """
@@ -814,6 +1018,34 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         else:
             # Fallback if wrapper stacks into a single tensor
             self._actions[env_ids] = 0.0
+
+
+
+        #____________________________________________________________________________
+        #____________________________________________________________________________
+        #____________________________________________________________________________
+        #Reset the wind buffers as well
+        # reset wind state for these envs
+        self._wind_yaw[env_ids] = torch.empty_like(self._wind_yaw[env_ids]).uniform_(-math.pi, math.pi)
+        self._wind_speed[env_ids] = torch.empty_like(self._wind_speed[env_ids]).uniform_(self.wind_vmin, self.wind_vmax)
+        self._wind_target_yaw[env_ids] = self._wind_yaw[env_ids]
+        self._wind_target_speed[env_ids] = self._wind_speed[env_ids]
+        self._wind_time_to_update[env_ids] = torch.empty_like(self._wind_time_to_update[env_ids]).uniform_(0.0, self.wind_update_interval)
+
+        # keep the old buffers consistent
+        self.wind_direction[env_ids, 0] = torch.cos(self._wind_yaw[env_ids])
+        self.wind_direction[env_ids, 1] = torch.sin(self._wind_yaw[env_ids])
+        self.wind_strength[env_ids] = self._wind_speed[env_ids]
+        self.wind_force[env_ids] = 0.0
+
+        # gust state reset
+        self.wind_gust_timer[env_ids] = 0.0
+        self.wind_gust_cooldown[env_ids] = 0.0
+        self.active_wind_force[env_ids] = 0.0
+
+        #____________________________________________________________________________
+        #____________________________________________________________________________
+        #____________________________________________________________________________
 
         # -----------------------------
         # Randomize initial states

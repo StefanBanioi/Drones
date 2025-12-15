@@ -141,7 +141,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
 
     # punishments    
     lin_vel_reward_scale = 0              # Penalize high linear velocity (drone) used to be 1.5 ->10
-    ang_vel_reward_scale = -0.1            # Penalize angular velocity (drone)   used to be -0.1 -> 1.10
+    ang_vel_reward_scale = 0            # Penalize angular velocity (drone)   used to be -0.1 -> 1.10
     time_penalty = -0.01                   # Per-step penalty to encourage speed
     died_penalty = 0.0                   # Penalty for going out of bounds used to be -100.0 -> -10.0
 
@@ -154,7 +154,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     #wrist_height_reward_scale = 0 #75            
     #wrist_height_penalty_scale = 0 #-75          
     alignment_reward = 25    # Now more than ever, we want the drone to be aligned with the arm's end-effector (Previously it was 0 as the arm immediately was in the correct initial position)                   
-    magnet_reward = 1000 
+    magnet_reward = 10000 
 
     # punishments    
     #lin_vel_reward_scale = 0.0                   
@@ -164,7 +164,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # Old wind scale for testing with old drone. Triple the conditions for the new bigger drone
     magnet_condition_distance = 0.4      # Distance at which the magnet can catch the drone
     magnet_condition_max_speed = 15       # Speed at which the magnet can catch the drone
-    magnet_time_threshold_in_seconds = 1  # Number of seconds the drone must be within the magnet condition to be considered caught
+    magnet_time_threshold_in_seconds = 0.1  # Number of seconds the drone must be within the magnet condition to be considered caught
 
     # Conditions for the drone to be considered aligned with the arm's end-effector
     approach_zone = 0.90  # Distance at which the drone is considered close enough to the arm's end-effector (90 cm)
@@ -190,3 +190,33 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # wind scale for testing overall performance
     # lower_wind_scale = 0.1
     # upper_wind_scale = 0.6
+
+        # -----------------------
+    # Wind mode toggle
+    # -----------------------
+    RealisticWindYesOrNo = True  # True = Option A (turn-rate integrated), False = Option B (cone updates)
+
+    # Wind speed range (Option A & B)
+    # (You can keep using lower_wind_scale / upper_wind_scale as the min/max)
+    wind_speed_min = lower_wind_scale
+    wind_speed_max = upper_wind_scale
+
+    # -----------------------
+    # Option A: realistic (noise -> turn rate)
+    # -----------------------
+    wind_max_yaw_rate_deg = 25.0   # max direction change speed (deg/s)
+
+    # -----------------------
+    # Option B: cone updates (new target every few seconds)
+    # -----------------------
+    wind_cone_half_angle_deg = 35.0  # max deviation from previous direction (deg)
+    wind_update_interval_s = 2.0     # how often we pick a new target direction/speed
+
+    # -----------------------
+    # Smoothing (both modes)
+    # -----------------------
+    wind_direction_tau_s = 0.7  # smaller = snappier direction transitions
+    wind_speed_tau_s = 0.9      # smaller = snappier speed transitions
+
+    # Optional: keep gusts from triggering after success
+    suppress_gusts_on_win = True
