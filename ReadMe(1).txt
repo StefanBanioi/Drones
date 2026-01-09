@@ -34,6 +34,7 @@ https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html <
 3. Navigate to the Isaac Lab folder:
 
     cd "C:\Users\UMRobotics\Desktop\IsaacLab"
+    cd "C:\Users\Stefan\Desktop\Thesis folder\IsaacNvidia\Drones" (home pc)
    
    (Update the path accordingly to where Isaac Lab is located on your machine.)
 
