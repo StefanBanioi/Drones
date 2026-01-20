@@ -127,6 +127,11 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4090, env_spacing=4.0, replicate_physics=True)
 
+    # --- UR10 reset randomization ---
+    ur10_reset_joint_noise = 0.40  # radians (~5.7 deg) start small
+    ur10_reset_wrist_only = False   # start safe; later set False
+
+
     # scales and constants
     vel_obs_scale = 0.2
     act_moving_average = 1.0
@@ -138,6 +143,16 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     orientation_reward_scale = 25.0        # Encourage robot EE to face upwards
     wrist_height_reward_scale = 0 #180         # Encourage wrists to be at a certain height
     wrist_height_penalty_scale = 0 #-180       # Penalize wrists being too low
+
+    safe_z_alignment_threshold = 0.90
+
+    arm_go_safe_scale = 1.0 
+
+    arm_hold_still_scale = 0.8 #was 0.5 
+
+    arm_near_jitter_scale = 0.25  #was 0.05
+
+    dist_reward_boost_near = 1.0
 
     # punishments    
     lin_vel_reward_scale = 0              # Penalize high linear velocity (drone) used to be 1.5 ->10
@@ -170,13 +185,13 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     approach_zone = 0.90  # Distance at which the drone is considered close enough to the arm's end-effector (90 cm)
     alignment_threshold = 0.70  # Cosine similarity threshold for alignment (0.70 corresponds to ~45° angle (arccos(0.70) ≈ 45°))  ~45.572996 degrees
 
-    # # wind scale for no wind 
-    # lower_wind_scale = 0.0
-    # upper_wind_scale = 0.0 
+    # wind scale for no wind 
+    lower_wind_scale = 0.0
+    upper_wind_scale = 0.0 
 
     # wind scale for wind
-    lower_wind_scale = 0.1
-    upper_wind_scale = 0.2
+    # lower_wind_scale = 0.1
+    # upper_wind_scale = 0.2
 
 
     # # wind scale for medium wind

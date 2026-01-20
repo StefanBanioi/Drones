@@ -11,6 +11,7 @@ from collections.abc import Sequence
 import gymnasium as gym
 import numpy as np
 
+from isaaclab.envs.mdp.observations import joint_pos
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation
 from isaaclab.envs import DirectMARLEnv
@@ -24,7 +25,8 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.sim import UsdFileCfg, PreviewSurfaceCfg
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
-from isaaclab.markers import CUBOID_MARKER_CFG  
+from isaaclab.markers import CUBOID_MARKER_CFG
+from isaaclab_tasks.manager_based.navigation.mdp import rewards  
 from .dronemultiagent_marl_env_cfg import DronemultiagentMarlEnvCfg
         
 
@@ -105,6 +107,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self.arm_dof_targets = torch.zeros((self.num_envs, self.num_arm_dofs), dtype=torch.float, device=self.device)
         self.arm_prev_targets = torch.zeros_like(self.arm_dof_targets)
         self.arm_curr_targets = torch.zeros_like(self.arm_dof_targets)
+    
 
         # Get actuated joint indices (if needed)
         self.actuated_dof_indices = [
@@ -202,6 +205,9 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                 # UR10-centric
                 "orientation_reward",
                 "wrist_height_reward", 
+                "arm_go_safe",
+                "arm_hold_still",
+                "arm_near_jitter",
 
                 # Shared penalty 
                 "died_penalty",
@@ -757,11 +763,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # --- WINNING CONDITION ---
         self._winning_condition |= magnet_condition  # keep your success flag behavior
 
-
-
-
-
-
         # Time shaping (same direction/sign as single-agent dict term)
         time_shaping = (1.0 - (self.episode_length_buf / self.max_episode_length))
 
@@ -769,6 +770,22 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         z_alignment = ee_up[:, 2]                    # [-1, 1], higher is better
         self._ee_alignment = z_alignment             # for debugging
         orientation_reward = z_alignment * self.cfg.orientation_reward_scale  # scale now; dt later in dict
+
+        # ----------------------------
+        # NEW: Far/near gating + "safe pose then hold"
+        # ----------------------------
+        near = in_approach_zone.float()
+        far = 1.0 - near
+
+        # "Safe enough" threshold: how upright the pad must be to be considered safe
+        safe_thr = getattr(self.cfg, "safe_z_alignment_threshold", 0.90)  # default if not in cfg
+        safe = (z_alignment > safe_thr).float()
+
+        # Arm motion measure (penalize physical motion). This is robust and hard to exploit.
+        arm_qd = self._Ur10Arm.data.joint_vel  # [N, num_joints]
+        arm_motion = torch.sum(arm_qd * arm_qd, dim=1)  # [N]
+
+
 
         # Bounds / death penalty (same as single-agent added code)
         env_origins = self._terrain.env_origins  # (num_envs, 3)
@@ -826,9 +843,27 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             "alignment_reward": alignment_reward,
             "magnet_reward": magnet_reward,
 
-            # UR10-centric
+            # # UR10-centric
             "orientation_reward": orientation_reward * self.step_dt,
             "wrist_height_reward": wrist_reward,
+            # ----------------------------
+            # NEW: UR10 safe-then-hold shaping
+            # ----------------------------
+            "arm_go_safe": (
+                getattr(self.cfg, "arm_go_safe_scale", 1.0)
+                * far * (1.0 - safe) * z_alignment * self.step_dt
+            ),
+
+            "arm_hold_still": (
+                -getattr(self.cfg, "arm_hold_still_scale", 0.5)
+                * far * safe * arm_motion * self.step_dt
+            ),
+
+            # optional: small anti-jitter penalty when near (keeps it from vibrating)
+            "arm_near_jitter": (
+                -getattr(self.cfg, "arm_near_jitter_scale", 0.05)
+                * near * arm_motion * self.step_dt
+            ),
 
             # Shared penalty
             "died_penalty": died_penalty,
@@ -854,13 +889,25 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             + rewards["died_penalty"]
         )
 
-        # UR10 gets: orientation + helping by being close (distance shaping) + wrist pose
-        # (Optionally also give it a slice of proximity/smooth_landing if you want cooperative coupling)
+        # # UR10 gets: orientation + helping by being close (distance shaping) + wrist pose
+        # # (Optionally also give it a slice of proximity/smooth_landing if you want cooperative coupling)
+        # ur10_total_reward = (
+        #     rewards["orientation_reward"]
+        #     + rewards["wrist_height_reward"]
+        #     + rewards["distance_to_goal"]   # encourages the arm to “meet” the drone
+        # )
+        # Only encourage "meeting" the drone when it is close enough to matter
+        ur10_help_distance = rewards["distance_to_goal"] * near
+        
         ur10_total_reward = (
             rewards["orientation_reward"]
             + rewards["wrist_height_reward"]
-            + rewards["distance_to_goal"]   # encourages the arm to “meet” the drone
+            + ur10_help_distance
+            + rewards["arm_go_safe"]
+            + rewards["arm_hold_still"]
+            + rewards["arm_near_jitter"]
         )
+
 
         return {"_Ur10Arm": ur10_total_reward, "_DroneRobot": drone_total_reward}
 
@@ -1051,29 +1098,86 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # Randomize initial states
         # -----------------------------
         # Drone
-        joint_pos = self._DroneRobot.data.default_joint_pos[env_ids]
-        joint_vel = self._DroneRobot.data.default_joint_vel[env_ids]
-        default_root_state = self._DroneRobot.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
-        default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
-        default_root_state[:, 2] += torch.zeros(len(env_ids), device=device).uniform_(0.0, 0.5)
+        # joint_pos = self._DroneRobot.data.default_joint_pos[env_ids]
+        # joint_vel = self._DroneRobot.data.default_joint_vel[env_ids]
+        # default_root_state = self._DroneRobot.data.default_root_state[env_ids]
 
-        self._DroneRobot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        self._DroneRobot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        joint_pos = self._DroneRobot.data.default_joint_pos[env_ids].clone()
+        joint_vel = self._DroneRobot.data.default_joint_vel[env_ids].clone()
+        drone_default_root_state = self._DroneRobot.data.default_root_state[env_ids].clone()
+
+
+        drone_default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        drone_default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
+        drone_default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
+        drone_default_root_state[:, 2] += torch.zeros(len(env_ids), device=device).uniform_(0.0, 0.5)
+
+        self._DroneRobot.write_root_pose_to_sim(drone_default_root_state[:, :7], env_ids)
+        self._DroneRobot.write_root_velocity_to_sim(drone_default_root_state[:, 7:], env_ids)
         self._DroneRobot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # UR10
-        joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids]
-        joint_vel = self._Ur10Arm.data.default_joint_vel[env_ids]
-        default_root_state = self._Ur10Arm.data.default_root_state[env_ids]
-        default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
-        default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+        # # UR10
+        # joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids]
+        # joint_vel = self._Ur10Arm.data.default_joint_vel[env_ids]
+        # default_root_state = self._Ur10Arm.data.default_root_state[env_ids]
+        # default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        # default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+        # default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
 
-        self._Ur10Arm.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        self._Ur10Arm.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        # This is testing with a slightyly randomized starting postion of the ur10 joints 
+        
+        
+        
+        # UR10
+        joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids].clone()
+        joint_vel = self._Ur10Arm.data.default_joint_vel[env_ids].clone()
+
+        # --- NEW: randomize UR10 joint positions on reset ---
+        noise_scale = getattr(self.cfg, "ur10_reset_joint_noise", 0.15)  # radians
+        noise = torch.empty_like(joint_pos).uniform_(-noise_scale, noise_scale)
+
+        # Optional: only randomize wrist joints first (safer, less chaos)
+        if getattr(self.cfg, "ur10_reset_wrist_only", True):
+            # UR10 joint order in your USD is typically:
+            # [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]
+            mask = torch.tensor([0, 0, 0, 1, 1, 1], device=device, dtype=joint_pos.dtype)
+            noise = noise * mask
+
+        joint_pos = joint_pos + noise
+
+        # Clamp to joint limits (you already computed these in __init__)
+        lower = self.arm_dof_lower_limits[env_ids]
+        upper = self.arm_dof_upper_limits[env_ids]
+        joint_pos = torch.clamp(joint_pos, lower, upper)
+
+        # Start from rest
+        joint_vel[:] = 0.0
+
+
+
+
+
+        # self._Ur10Arm.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
+        # self._Ur10Arm.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
+        # self._Ur10Arm.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # --- FIX: UR10 needs its OWN root state (do not reuse drone default_root_state) ---
+        ur10_root_state = self._Ur10Arm.data.default_root_state[env_ids].clone()
+        ur10_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        ur10_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+        ur10_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+
+        self._Ur10Arm.write_root_pose_to_sim(ur10_root_state[:, :7], env_ids)
+        self._Ur10Arm.write_root_velocity_to_sim(ur10_root_state[:, 7:], env_ids)
         self._Ur10Arm.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # --- NEW: keep your target buffers consistent so the controller doesn't "snap" on step 1 ---
+        self.arm_prev_targets[env_ids] = joint_pos
+        self.arm_curr_targets[env_ids] = joint_pos
+
+        if torch.rand(1).item() < 0.01:
+            print("[RESET] UR10 joint_pos std:", joint_pos.std(dim=0))
+
 
 
 
