@@ -28,7 +28,7 @@ from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # env
     decimation = 2
-    episode_length_s = 6.0
+    episode_length_s = 2.0 #was 6 seconds then 3 seconds now 2
 
     # multi-agent specification and spaces definition
     possible_agents = ["_DroneRobot", "_Ur10Arm"]
@@ -113,23 +113,12 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     thrust_to_weight = 1.9
     moment_scale = 0.01 
 
-    # # goal object
-    # goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
-    #     prim_path="/Visuals/goal_marker",
-    #     markers={
-    #         "goal": sim_utils.SphereCfg(
-    #             radius=0.0335,
-    #             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.3, 1.0)),
-    #         ),
-    #     },
-    # )
-
     # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4090, env_spacing=4.0, replicate_physics=True)
 
     # --- UR10 reset randomization ---
     ur10_reset_joint_noise = 0.40  # radians (~5.7 deg) start small
-    ur10_reset_wrist_only = False   # start safe; later set False
+    ur10_reset_wrist_only = True   # start safe; later set False
 
 
     # scales and constants
@@ -160,21 +149,8 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     time_penalty = -0.01                   # Per-step penalty to encourage speed
     died_penalty = 0.0                   # Penalty for going out of bounds used to be -100.0 -> -10.0
 
-
-    #distance_to_goal_reward_scale = 300.0        
-    #smooth_landing_bonus = 180                   
-    #proximity_bonus = 250.0                      
-    #time_bonus_scale = 5.0                       
-    #orientation_reward_scale = 25                
-    #wrist_height_reward_scale = 0 #75            
-    #wrist_height_penalty_scale = 0 #-75          
     alignment_reward = 25    # Now more than ever, we want the drone to be aligned with the arm's end-effector (Previously it was 0 as the arm immediately was in the correct initial position)                   
-    magnet_reward = 10000 
-
-    # punishments    
-    #lin_vel_reward_scale = 0.0                   
-    #ang_vel_reward_scale = 2.5 #From -0.1 to -1.0  to -0.3   (Increased to 2.5 as I do want the drone to actually have some tilt)            
-    #died_penalty = -100.0                        
+    magnet_reward = 10000                  
 
     # Old wind scale for testing with old drone. Triple the conditions for the new bigger drone
     magnet_condition_distance = 0.4      # Distance at which the magnet can catch the drone
@@ -206,13 +182,12 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # lower_wind_scale = 0.1
     # upper_wind_scale = 0.6
 
-        # -----------------------
+    # -----------------------
     # Wind mode toggle
     # -----------------------
     RealisticWindYesOrNo = True  # True = Option A (turn-rate integrated), False = Option B (cone updates)
 
     # Wind speed range (Option A & B)
-    # (You can keep using lower_wind_scale / upper_wind_scale as the min/max)
     wind_speed_min = lower_wind_scale
     wind_speed_max = upper_wind_scale
 
