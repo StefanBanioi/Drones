@@ -116,15 +116,90 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # Scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4090, env_spacing=4.0, replicate_physics=True)
 
-    # --- UR10 reset randomization ---
-    ur10_reset_joint_noise = 0.40  # radians (~5.7 deg) start small
-    ur10_reset_wrist_only = True   # start safe; later set False
-
-
     # scales and constants
     vel_obs_scale = 0.2
     act_moving_average = 1.0
     
+
+
+    #------------------------------------------------------------
+    # PLATFORM MOVENT PARAMETERS
+    #------------------------------------------------------------
+
+    enable_platform_motion = True
+    """
+    If True, applies a smooth, kinematic motion to the UR10 *base* each simulation step.
+    This approximates boat/deck motion (heave/sway/surge + optional pitch/roll) without
+    requiring a full floating-boat physics model.
+    """
+
+    # --- Translational components (meters) ---
+    platform_surge_amplitude = 0.10 #was 0.00
+    """
+    Surge amplitude in meters: motion along +X of the world frame.
+    Typical range: 0.00-0.05 m. Start small (0.01-0.03) for stability.
+    """
+
+    platform_sway_amplitude = 0.10 #was 0.00
+    """
+    Sway amplitude in meters: motion along +Y of the world frame.
+    Typical range: 0.00-0.05 m. Start small (0.01-0.03).
+    """
+
+    platform_heave_amplitude = 0.10 #was 0.02
+    """
+    Heave amplitude in meters: motion along +Z of the world frame (up/down).
+    Typical range: 0.00-0.08 m. Start small (0.01-0.03).
+    """
+
+    # --- Rotational components (degrees) ---
+    platform_roll_amplitude_deg = 0.0
+    """
+    Roll amplitude in degrees: rotation about the +X axis (tilting left/right).
+    Typical range: 0-5 deg. Start at 0-2 deg.
+    """
+
+    platform_pitch_amplitude_deg = 3.0 # was 1.0
+    """
+    Pitch amplitude in degrees: rotation about the +Y axis (tilting forward/back).
+    Typical range: 0-5 deg. Start at 0-2 deg.
+    """
+
+    # --- Frequency (Hz) ---
+    platform_motion_frequency_hz = 0.20
+    """
+    Base oscillation frequency in Hz for all platform motion components.
+    Typical maritime-like range: 0.10-0.50 Hz.
+    Higher frequency makes control harder and can destabilize training.
+    """
+
+    platform_random_phase = True
+    """
+    If True, each environment gets an independent random phase per motion axis.
+    This prevents all envs moving in sync and improves robustness.
+    If False, all envs share the same phase (more reproducible/visualizable).
+    """
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # -------------------------------------------------------------
+    # REWARDS
+    # -------------------------------------------------------------
+
     distance_to_goal_reward_scale = 300.0   # Reward approaching robot EE
     smooth_landing_bonus = 180.0            # Bonus when drone is both slow and close
     proximity_bonus = 250.0                 # Bonus when drone is very close

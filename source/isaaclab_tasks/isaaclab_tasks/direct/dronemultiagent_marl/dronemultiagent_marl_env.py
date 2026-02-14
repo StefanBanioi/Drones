@@ -36,6 +36,15 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     def __init__(self, cfg: DronemultiagentMarlEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
        
+        # Boat movement parameters 
+        self._platform_dx = torch.zeros(self.num_envs, device=self.device)
+        self._platform_dy = torch.zeros(self.num_envs, device=self.device)
+        self._platform_dz = torch.zeros(self.num_envs, device=self.device)
+        self._platform_roll = torch.zeros(self.num_envs, device=self.device)
+        self._platform_pitch = torch.zeros(self.num_envs, device=self.device)
+
+
+
         # Adding the wind forces to the drone
         self.wind_force = torch.zeros((self.num_envs, 1, 3), device=self.device)  # shape: [envs, bodies, vec3]
         self.wind_timer = torch.zeros(self.num_envs, device=self.device)  # How long current wind lasts
@@ -145,6 +154,39 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         self._step_count = 0
 
+        # --------------------------------------------------------------------
+        # PLATFORM MOTION
+        # --------------------------------------------------------------------
+        self._platform_motion_enabled = getattr(self.cfg, "enable_platform_motion", False)
+
+        # Base UR10 root state around which motion is applied (pos+quat+linvel+angvel)
+        self._ur10_root_state_base = self._Ur10Arm.data.default_root_state.clone()  # [num_envs, 13]
+
+        # Global time accumulator for the platform motion
+        self._platform_time = torch.tensor(0.0, device=self.device)
+
+        if self._platform_motion_enabled:
+            # Random phases per env and per axis (surge, sway, heave, roll, pitch)
+            if getattr(self.cfg, "platform_random_phase", True):
+                self._platform_phase = torch.empty((self.num_envs, 5), device=self.device).uniform_(0.0, 2.0 * math.pi)
+            else:
+                self._platform_phase = torch.zeros((self.num_envs, 5), device=self.device)
+
+        # Debug marker: arrow (we reuse arrow_x.usd like your wind marker)
+        self.platform_marker_cfg = VisualizationMarkersCfg(
+            prim_path="/World/Visuals/PlatformMotion",
+            markers={
+                "platform_arrow": UsdFileCfg(
+                    usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                    scale=(0.15, 0.03, 0.6),  # base scale; we'll modulate via position/meaning not true scaling
+                    visual_material=PreviewSurfaceCfg(diffuse_color=(0.2, 1.0, 0.2)),
+                )
+            }
+        )
+        self.platform_markers = VisualizationMarkers(self.platform_marker_cfg)
+
+
+
         ###### Code added here for logging and success/failure tracking ##########
         # add a episode level success tracker 
         self._episode_success_flags = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -224,7 +266,89 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._actions["_Ur10Arm"] = actions["_Ur10Arm"].clone().clamp(-1.0, 1.0)
         self._actions["_DroneRobot"] = actions["_DroneRobot"].clone().clamp(-1.0, 1.0)
 
-                # Update desired_pos_w (target for drone) to UR10 end-effector position
+
+        # -----------------------------------------------------------
+        # Apply platform motion (boat-like) to UR10 base 
+        # -----------------------------------------------------------
+        if getattr(self.cfg, "enable_platform_motion", False):
+            dt = self.step_dt
+            self._platform_time = self._platform_time + dt
+
+            f_hz = getattr(self.cfg, "platform_motion_frequency_hz", 0.20)
+            omega = 2.0 * math.pi * f_hz
+
+            # amplitudes
+            Ax = getattr(self.cfg, "platform_surge_amplitude", 0.0)
+            Ay = getattr(self.cfg, "platform_sway_amplitude", 0.0)
+            Az = getattr(self.cfg, "platform_heave_amplitude", 0.0)
+
+            roll_amp = math.radians(getattr(self.cfg, "platform_roll_amplitude_deg", 0.0))
+            pitch_amp = math.radians(getattr(self.cfg, "platform_pitch_amplitude_deg", 0.0))
+
+            # phases per env
+            phase = getattr(self, "_platform_phase", None)
+            if phase is None:
+                phase = torch.zeros((self.num_envs, 5), device=self.device)
+
+            t = self._platform_time
+
+            # sinusoidal displacements
+            dx = Ax * torch.sin(omega * t + phase[:, 0])
+            dy = Ay * torch.sin(omega * t + phase[:, 1])
+            dz = Az * torch.sin(omega * t + phase[:, 2])
+
+            roll = roll_amp * torch.sin(omega * t + phase[:, 3])
+            pitch = pitch_amp * torch.sin(omega * t + phase[:, 4])
+
+            # Store for debug visualization
+            self._platform_dx[:] = dx
+            self._platform_dy[:] = dy
+            self._platform_dz[:] = dz
+            self._platform_roll[:] = roll
+            self._platform_pitch[:] = pitch
+
+
+
+            # velocities (derivatives)
+            vx = Ax * omega * torch.cos(omega * t + phase[:, 0])
+            vy = Ay * omega * torch.cos(omega * t + phase[:, 1])
+            vz = Az * omega * torch.cos(omega * t + phase[:, 2])
+
+            roll_dot = roll_amp * omega * torch.cos(omega * t + phase[:, 3])
+            pitch_dot = pitch_amp * omega * torch.cos(omega * t + phase[:, 4])
+
+            # build new UR10 root pose around base root state
+            base = self._ur10_root_state_base  # [N, 13]
+            ur10_root = base.clone()
+
+            ur10_root[:, 0] = base[:, 0] + dx
+            ur10_root[:, 1] = base[:, 1] + dy
+            ur10_root[:, 2] = base[:, 2] + dz
+
+            # orientation: base_quat ⊗ delta_quat(roll,pitch)
+            base_q = base[:, 3:7]
+            dq = self._quat_from_roll_pitch(roll, pitch)
+            ur10_root[:, 3:7] = self._quat_mul(base_q, dq)
+
+            # root velocities: linear + angular (approx)
+            root_vel = torch.zeros((self.num_envs, 6), device=self.device, dtype=ur10_root.dtype)
+            root_vel[:, 0] = vx
+            root_vel[:, 1] = vy
+            root_vel[:, 2] = vz
+            root_vel[:, 3] = roll_dot
+            root_vel[:, 4] = pitch_dot
+            root_vel[:, 5] = 0.0
+
+            # write to sim for all envs
+            env_ids_all = self._DroneRobot._ALL_INDICES
+            self._Ur10Arm.write_root_pose_to_sim(ur10_root[:, :7], env_ids_all)
+            self._Ur10Arm.write_root_velocity_to_sim(root_vel, env_ids_all)
+
+
+
+
+
+        # Update desired_pos_w (target for drone) to UR10 end-effector position
         ee_indices = self._Ur10Arm.find_bodies("ee_link")
         if len(ee_indices) == 0:
             raise RuntimeError("Could not find 'ee_link' on UR10!")
@@ -827,9 +951,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         device = self.device
 
-        # -----------------------------
-        # Compat layer for termination/timeouts across DirectRLEnv vs DirectMARLEnv
-        # -----------------------------
         def _get_flag(name_list, default=False):
             """Try several attribute names; if none found, return a bool tensor (default)."""
             for nm in name_list:
@@ -842,9 +963,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             return torch.zeros(self.num_envs, dtype=torch.bool, device=device) if default is False \
                 else torch.ones(self.num_envs, dtype=torch.bool, device=device)
 
-        # Try typical names used by Isaac Lab / wrappers
-        #   - Single-agent DirectRLEnv often had: reset_terminated, reset_time_outs
-        #   - MARL / wrappers often expose: terminated_buf, time_out_buf OR done_buf, timeout_buf
         terminated_flags = _get_flag(
             ["reset_terminated", "terminated_buf", "done_buf", "resets_terminated"], default=False
         )
@@ -993,156 +1111,211 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._DroneRobot.write_root_velocity_to_sim(drone_default_root_state[:, 7:], env_ids)
         self._DroneRobot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
-        # # UR10
-        # joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids]
-        # joint_vel = self._Ur10Arm.data.default_joint_vel[env_ids]
-        # default_root_state = self._Ur10Arm.data.default_root_state[env_ids]
-        # default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        # default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
-        # default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
-
-        # This is testing with a slightyly randomized starting postion of the ur10 joints 
-        
-        
-        
-        # UR10
-        joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids].clone()
-        joint_vel = self._Ur10Arm.data.default_joint_vel[env_ids].clone()
-
-        # --- NEW: randomize UR10 joint positions on reset ---
-        noise_scale = getattr(self.cfg, "ur10_reset_joint_noise", 0.15)  # radians
-        noise = torch.empty_like(joint_pos).uniform_(-noise_scale, noise_scale)
-
-        # Optional: only randomize wrist joints first (safer, less chaos)
-        if getattr(self.cfg, "ur10_reset_wrist_only", True):
-            # UR10 joint order in your USD is typically:
-            # [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]
-            mask = torch.tensor([0, 0, 0, 1, 1, 1], device=device, dtype=joint_pos.dtype)
-            noise = noise * mask
-
-        joint_pos = joint_pos + noise
-
-        # Clamp to joint limits (you already computed these in __init__)
-        lower = self.arm_dof_lower_limits[env_ids]
-        upper = self.arm_dof_upper_limits[env_ids]
-        joint_pos = torch.clamp(joint_pos, lower, upper)
-
-        # Start from rest
-        joint_vel[:] = 0.0
-
-        # self._Ur10Arm.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
-        # self._Ur10Arm.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
-        # self._Ur10Arm.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
-
-        # --- FIX: UR10 needs its OWN root state (do not reuse drone default_root_state) ---
+        # --- UR10 root state (single source of truth) ---
         ur10_root_state = self._Ur10Arm.data.default_root_state[env_ids].clone()
         ur10_root_state[:, :3] += self._terrain.env_origins[env_ids]
         ur10_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
         ur10_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
 
+        # Deterministic joint reset
+        joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids].clone()
+        joint_vel = torch.zeros_like(joint_pos)
+
+        # Store the reset root state as the reference for platform motion
+        self._ur10_root_state_base[env_ids] = ur10_root_state
+
+
         self._Ur10Arm.write_root_pose_to_sim(ur10_root_state[:, :7], env_ids)
         self._Ur10Arm.write_root_velocity_to_sim(ur10_root_state[:, 7:], env_ids)
         self._Ur10Arm.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
+        # Keep controller buffers aligned
         self.arm_prev_targets[env_ids] = joint_pos
         self.arm_curr_targets[env_ids] = joint_pos
 
-        if torch.rand(1).item() < 0.01:
-            print("[RESET] UR10 joint_pos std:", joint_pos.std(dim=0))
 
     def _set_debug_vis_impl(self, debug_vis: bool):
-            # create markers if necessary for the first tome
-            if debug_vis:
-                if not hasattr(self, "goal_pos_visualizer"):
-                    marker_cfg = CUBOID_MARKER_CFG.copy()
-                    marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
-                    # -- goal pose
-                    marker_cfg.prim_path = "/Visuals/Command/goal_position"
-                    self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
-                    
-                # Add frame marker for end effector
-                if not hasattr(self, "ee_frame_visualizer"):
-                    frame_marker_cfg = VisualizationMarkersCfg(
-                        prim_path="/Visuals/EndEffector/frame",
+        """Create/toggle debug markers."""
+        if debug_vis:
+            # --- Goal marker ---
+            if not hasattr(self, "goal_pos_visualizer"):
+                marker_cfg = CUBOID_MARKER_CFG.copy()
+                marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
+                marker_cfg.prim_path = "/Visuals/Command/goal_position"
+                self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
+            self.goal_pos_visualizer.set_visibility(True)
+
+            # --- End-effector frame marker ---
+            if not hasattr(self, "ee_frame_visualizer"):
+                frame_marker_cfg = VisualizationMarkersCfg(
+                    prim_path="/Visuals/EndEffector/frame",
+                    markers={
+                        "frame": sim_utils.UsdFileCfg(
+                            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
+                            scale=(0.05, 0.05, 0.05),
+                        )
+                    },
+                )
+                self.ee_frame_visualizer = VisualizationMarkers(frame_marker_cfg)
+            self.ee_frame_visualizer.set_visibility(True)
+
+            # --- Wind markers ---
+            if hasattr(self, "wind_markers"):
+                self.wind_markers.set_visibility(True)
+
+            # --- Platform motion debug marker (arrow above UR10 base) ---
+            show_platform = getattr(self.cfg, "platform_motion_debug_vis", True)
+            if show_platform:
+                if not hasattr(self, "platform_markers"):
+                    self.platform_marker_cfg = VisualizationMarkersCfg(
+                        prim_path="/World/Visuals/PlatformMotion",
                         markers={
-                            "frame": sim_utils.UsdFileCfg(
-                                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/frame_prim.usd",
-                                scale=(0.05, 0.05, 0.05),
+                            "platform_arrow": sim_utils.UsdFileCfg(
+                                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/UIElements/arrow_x.usd",
+                                scale=(0.15, 0.03, 0.6),
+                                visual_material=PreviewSurfaceCfg(diffuse_color=(0.2, 1.0, 0.2)),
                             )
-                        }
+                        },
                     )
-                    self.ee_frame_visualizer = VisualizationMarkers(frame_marker_cfg)
-                    
-                # set their visibility to true
-                self.goal_pos_visualizer.set_visibility(True)
-                if hasattr(self, "ee_frame_visualizer"):
-                    self.ee_frame_visualizer.set_visibility(True)
+                    self.platform_markers = VisualizationMarkers(self.platform_marker_cfg)
+                self.platform_markers.set_visibility(True)
             else:
-                if hasattr(self, "goal_pos_visualizer"):
-                    self.goal_pos_visualizer.set_visibility(False)
-                if hasattr(self, "ee_frame_visualizer"):
-                    self.ee_frame_visualizer.set_visibility(False)
+                if hasattr(self, "platform_markers"):
+                    self.platform_markers.set_visibility(False)
+
+        else:
+            # turn everything off
+            if hasattr(self, "goal_pos_visualizer"):
+                self.goal_pos_visualizer.set_visibility(False)
+            if hasattr(self, "ee_frame_visualizer"):
+                self.ee_frame_visualizer.set_visibility(False)
+            if hasattr(self, "wind_markers"):
+                self.wind_markers.set_visibility(False)
+            if hasattr(self, "platform_markers"):
+                self.platform_markers.set_visibility(False)
+
 
     def _debug_vis_callback(self, event):
-        # update the markers
-        self.goal_pos_visualizer.visualize(self._desired_pos_w)
-        # Update end effector frame marker
-        # === Existing success/failure print ===
+        """Update debug markers each frame."""
+        # --- Goal marker ---
+        if hasattr(self, "goal_pos_visualizer"):
+            self.goal_pos_visualizer.visualize(self._desired_pos_w)
+
+        # --- Existing success/failure print (optional; can be noisy) ---
         status = self._success_status.cpu().numpy()
-        print(f"[STEP {self._step_count}] Success: {(status == 1).sum()} | Magnet Success: {(status == 2).sum()} | Failure: {(status == -1).sum()} | Timeout: {(status == -2).sum()}")
-
-        # === Wind arrow visualization ===
-        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
-        active_vecs = self.active_wind_force[:, 0, :]  # [N, 3]
-        constant_wind_vecs = self.wind_force[:, 0, :]  # [N, 3]
-        wind_vecs = active_vecs + constant_wind_vecs  # [N, 3]
-        # Normalize direction for orientation
-        wind_dirs = torch.nn.functional.normalize(wind_vecs, dim=1)
-        arrow_length = 0.4
-        arrow_tip = drone_pos + wind_dirs * arrow_length
-
-        # Orientation (yaw around Z-axis)
-        yaw_angles = torch.atan2(wind_dirs[:, 1], wind_dirs[:, 0])
-        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1)
-        arrow_orientations = quat_from_angle_axis(yaw_angles, z_axis)
-
-        # === Compute wind color ===
-        # Norm of each force vector (N)
-        wind_mags = torch.norm(wind_vecs, dim=-1)
-
-        # Normalize for coloring: 0 N → blue, 1.0+ N → red
-        normed = wind_mags.clamp(0.0, 1.0)
-        colors = torch.zeros((self.num_envs, 3), device=self.device)
-
-        # Between blue and yellow
-        low_mask = normed < 0.5
-        t_low = normed[low_mask] * 2.0  # map to [0, 1]
-        colors[low_mask] = (
-            (1.0 - t_low).unsqueeze(-1) * torch.tensor([0.2, 0.6, 1.0], device=self.device)
-            + t_low.unsqueeze(-1) * torch.tensor([1.0, 1.0, 0.0], device=self.device)
+        print(
+            f"[STEP {self._step_count}] Success: {(status == 1).sum()} | "
+            f"Magnet Success: {(status == 2).sum()} | Failure: {(status == -1).sum()} | Timeout: {(status == -2).sum()}"
         )
 
-        # Between yellow and red
-        high_mask = normed >= 0.5
-        t_high = (normed[high_mask] - 0.5) * 2.0  # map to [0, 1]
-        colors[high_mask] = (
-            (1.0 - t_high).unsqueeze(-1) * torch.tensor([1.0, 1.0, 0.0], device=self.device)
-            + t_high.unsqueeze(-1) * torch.tensor([1.0, 0.0, 0.0], device=self.device)
-        )
+        # --- Wind arrow visualization ---
+        if hasattr(self, "wind_markers"):
+            drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+            active_vecs = self.active_wind_force[:, 0, :]     # [N, 3]
+            constant_vecs = self.wind_force[:, 0, :]          # [N, 3]
+            wind_vecs = active_vecs + constant_vecs           # [N, 3]
 
-        # === Visualize ===
-        self.wind_markers.visualize(
-            drone_pos, arrow_orientations, colors
-        ) 
-        # Update end effector frame marker        
-        
+            wind_dirs = torch.nn.functional.normalize(wind_vecs, dim=1)
+            yaw_angles = torch.atan2(wind_dirs[:, 1], wind_dirs[:, 0])
+            z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, -1)
+            arrow_orients = quat_from_angle_axis(yaw_angles, z_axis)
+
+            wind_mags = torch.norm(wind_vecs, dim=-1)
+            normed = wind_mags.clamp(0.0, 1.0)
+            colors = torch.zeros((self.num_envs, 3), device=self.device)
+
+            low_mask = normed < 0.5
+            t_low = normed[low_mask] * 2.0
+            colors[low_mask] = (
+                (1.0 - t_low).unsqueeze(-1) * torch.tensor([0.2, 0.6, 1.0], device=self.device)
+                + t_low.unsqueeze(-1) * torch.tensor([1.0, 1.0, 0.0], device=self.device)
+            )
+
+            high_mask = ~low_mask
+            t_high = (normed[high_mask] - 0.5) * 2.0
+            colors[high_mask] = (
+                (1.0 - t_high).unsqueeze(-1) * torch.tensor([1.0, 1.0, 0.0], device=self.device)
+                + t_high.unsqueeze(-1) * torch.tensor([1.0, 0.0, 0.0], device=self.device)
+            )
+
+            self.wind_markers.visualize(drone_pos, arrow_orients, colors)
+
+        # --- End-effector frame marker ---
         if hasattr(self, "ee_frame_visualizer"):
             ee_indices = self._Ur10Arm.find_bodies("ee_link")
             if len(ee_indices) > 0:
-                ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
-                ee_quat = self._Ur10Arm.data.body_quat_w[:, ee_indices[0], :].squeeze(1)  # Remove extra dimension
+                ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_indices[0], :].squeeze(1)
+                ee_quat = self._Ur10Arm.data.body_quat_w[:, ee_indices[0], :].squeeze(1)
                 self.ee_frame_visualizer.visualize(ee_pos, ee_quat)
+
+        # --- Platform motion marker (arrow above UR10 base) ---
+        if hasattr(self, "platform_markers") and getattr(self.cfg, "platform_motion_debug_vis", True):
+            ur10_pos = self._Ur10Arm.data.root_pos_w[:, :3]
+            arrow_pos = ur10_pos + torch.tensor([0.0, 0.0, 0.30], device=self.device)
+
+            # Point arrow "up": arrow_x rotated +90° around Y
+            y_axis = torch.tensor([0.0, 1.0, 0.0], device=self.device).expand(self.num_envs, -1)
+            up_orient = quat_from_angle_axis(
+                torch.full((self.num_envs,), math.pi / 2, device=self.device),
+                y_axis,
+            )
+
+            # Color encodes normalized heave magnitude |dz|/Az
+            Az = float(getattr(self.cfg, "platform_heave_amplitude", 0.0))
+            dz = getattr(self, "_platform_dz", torch.zeros(self.num_envs, device=self.device))
+            norm = torch.abs(dz) / max(Az, 1e-6)
+            norm = norm.clamp(0.0, 1.0)
+
+            colors = torch.zeros((self.num_envs, 3), device=self.device)
+
+            # green -> yellow -> red
+            low = norm < 0.5
+            t = (norm[low] * 2.0).unsqueeze(-1)
+            colors[low] = (1.0 - t) * torch.tensor([0.2, 1.0, 0.2], device=self.device) + t * torch.tensor(
+                [1.0, 1.0, 0.0], device=self.device
+            )
+
+            high = ~low
+            t2 = ((norm[high] - 0.5) * 2.0).unsqueeze(-1)
+            colors[high] = (1.0 - t2) * torch.tensor([1.0, 1.0, 0.0], device=self.device) + t2 * torch.tensor(
+                [1.0, 0.2, 0.2], device=self.device
+            )
+
+            self.platform_markers.visualize(arrow_pos, up_orient, colors)
+
+        
             
+
+    @staticmethod
+    def _quat_mul(q1: torch.Tensor, q2: torch.Tensor) -> torch.Tensor:
+        """Multiply quaternions q = q1 ⊗ q2, with quats in (w, x, y, z)."""
+        w1, x1, y1, z1 = q1.unbind(-1)
+        w2, x2, y2, z2 = q2.unbind(-1)
+        return torch.stack([
+            w1*w2 - x1*x2 - y1*y2 - z1*z2,
+            w1*x2 + x1*w2 + y1*z2 - z1*y2,
+            w1*y2 - x1*z2 + y1*w2 + z1*x2,
+            w1*z2 + x1*y2 - y1*x2 + z1*w2
+        ], dim=-1)
+
+    @staticmethod
+    def _quat_from_roll_pitch(roll: torch.Tensor, pitch: torch.Tensor) -> torch.Tensor:
+        """Quaternion from roll (x) and pitch (y), zero yaw. Output (w, x, y, z)."""
+        cr = torch.cos(roll * 0.5)
+        sr = torch.sin(roll * 0.5)
+        cp = torch.cos(pitch * 0.5)
+        sp = torch.sin(pitch * 0.5)
+
+        # q = q_pitch ⊗ q_roll (or roll then pitch; for small angles it won't matter much)
+        # roll about x: (cr, sr, 0, 0)
+        # pitch about y: (cp, 0, sp, 0)
+        w = cp * cr
+        x = cp * sr
+        y = sp * cr
+        z = -sp * sr
+        return torch.stack([w, x, y, z], dim=-1)
+
+
 @torch.jit.script
 def scale(x, lower, upper):
     return 0.5 * (x + 1.0) * (upper - lower) + lower
