@@ -1,5 +1,6 @@
 Autonomous Drone Landing with UR10 Arm – README
 
+
 This project involves training a reinforcement learning (RL) agent to perform autonomous drone landings on a UR10 robotic arm using NVIDIA Isaac Sim and Isaac Lab.
 
 == IMPORTANT == 
@@ -34,7 +35,6 @@ https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/index.html <
 3. Navigate to the Isaac Lab folder:
 
     cd "C:\Users\UMRobotics\Desktop\IsaacLab"
-    cd "C:\Users\Stefan\Desktop\Thesis folder\IsaacNvidia\Drones" (home pc)
    
    (Update the path accordingly to where Isaac Lab is located on your machine.)
 

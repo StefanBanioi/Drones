@@ -1,0 +1,23 @@
+Read me file specific for the newest version of the Isaaclab and IsaacSim implementation of my code
+
+ ||____This version of the read me file is **specifically** made for my pc **only** for now :D ____|| 
+
+Open Anaconda Poweshell
+cd "C:\Users\StefanB\isaacsim"
+git lfs install
+git lfs pull
+cd _build/windows-x86_64/release
+isaac-sim.bat
+
+This opens isaacsim
+
+(yes its different name)
+cd "C:\Users\StefanB"
+conda activate C:\Users\StefanB\miniconda3\envs\env_isaaclab_5.1
+cd "C:\Users\StefanB\Desktop\IsaacLab"
+
+
+
+python scripts\reinforcement_learning\skrl\train.py --task Isaac-Dronemultiagent-Marl-Direct-v0 --algorithm MAPPO --num_env 10000 --headless
+
+Isaac-TrackPositionNoObstacles-ARL-Robot-1-Play-v0
