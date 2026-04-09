@@ -16,7 +16,7 @@ from isaaclab.utils import configclass
 #from isaaclab_tasks.direct.arm_drone_communication.arm_drone_communication_env import ArmDroneCommunicationEnv
 from isaaclab_assets import CRAZYFLIE_CFG  # isort: skip
 from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
-from isaaclab_assets.robots.VertexOneV1 import VERTEX_ONE_CFG
+#from isaaclab_assets.robots.VertexOneV1 import VERTEX_ONE_CFG
 
 
 @configclass

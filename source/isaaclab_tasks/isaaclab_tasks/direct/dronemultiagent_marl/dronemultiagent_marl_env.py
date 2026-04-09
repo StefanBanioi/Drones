@@ -255,12 +255,47 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self.cfg.terrain.env_spacing = self.scene.cfg.env_spacing
         self._terrain = self.cfg.terrain.class_type(self.cfg.terrain)
         
+        # Optionally disable collisions on the ground plane (visual only)
+        # --- NEW: disable ground collisions for boat scenario ---
+        if getattr(self.cfg, "disable_ground_collisions", False):
+            self._disable_ground_collisions("/World/ground")
+
+
         # clone and replicate
         self.scene.clone_environments(copy_from_source=False)
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+
+    # I will try to disable the ground collisions. 
+    def _disable_ground_collisions(self, prim_path: str = "/World/ground"):
+        """Disable collisions for the ground prim and its descendants (visual-only ground)."""
+        try:
+            from pxr import Usd, UsdPhysics
+            stage = sim_utils.get_current_stage()
+
+            root_prim = stage.GetPrimAtPath(prim_path)
+            if not root_prim.IsValid():
+                print(f"[WARN] Ground prim not found at {prim_path}; cannot disable collisions.")
+                return
+
+            for prim in Usd.PrimRange(root_prim):
+                if not prim.IsValid():
+                    continue
+
+                if prim.HasAPI(UsdPhysics.CollisionAPI):
+                    api = UsdPhysics.CollisionAPI(prim)
+                else:
+                    api = UsdPhysics.CollisionAPI.Apply(prim)
+
+                api.GetCollisionEnabledAttr().Set(False)
+
+            print(f"[INFO] Disabled collisions for ground prim subtree: {prim_path}")
+
+        except Exception as e:
+            print(f"[WARN] Failed to disable ground collisions on {prim_path}: {e}")
+    
     def _pre_physics_step(self, actions: dict[str, torch.Tensor]) -> None:
         # Clamp and store actions
         self._actions["_Ur10Arm"] = actions["_Ur10Arm"].clone().clamp(-1.0, 1.0)

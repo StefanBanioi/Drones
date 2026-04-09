@@ -120,7 +120,12 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     vel_obs_scale = 0.2
     act_moving_average = 1.0
     
-
+    disable_ground_collisions = True
+    """
+    If True, disables collisions for the terrain plane (/World/ground).
+    This is useful for open-water / boat scenarios, where the manipulator should not
+    physically collide with a 'ground' surface. The plane remains as a visual reference.
+    """
 
     #------------------------------------------------------------
     # PLATFORM MOVENT PARAMETERS
@@ -134,46 +139,46 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     """
 
     # --- Translational components (meters) ---
-    platform_surge_amplitude = 0.10 #was 0.00
+    platform_surge_amplitude = 0.0 #was 0.00
     """
     Surge amplitude in meters: motion along +X of the world frame.
     Typical range: 0.00-0.05 m. Start small (0.01-0.03) for stability.
     """
 
-    platform_sway_amplitude = 0.10 #was 0.00
+    platform_sway_amplitude = 0.0 #was 0.00
     """
     Sway amplitude in meters: motion along +Y of the world frame.
     Typical range: 0.00-0.05 m. Start small (0.01-0.03).
     """
 
-    platform_heave_amplitude = 0.10 #was 0.02
+    platform_heave_amplitude = 0.0 #was 0.02
     """
     Heave amplitude in meters: motion along +Z of the world frame (up/down).
     Typical range: 0.00-0.08 m. Start small (0.01-0.03).
     """
 
     # --- Rotational components (degrees) ---
-    platform_roll_amplitude_deg = 0.0
+    platform_roll_amplitude_deg = 13.0
     """
     Roll amplitude in degrees: rotation about the +X axis (tilting left/right).
     Typical range: 0-5 deg. Start at 0-2 deg.
     """
 
-    platform_pitch_amplitude_deg = 3.0 # was 1.0
+    platform_pitch_amplitude_deg = 13.0 # was 1.0
     """
     Pitch amplitude in degrees: rotation about the +Y axis (tilting forward/back).
     Typical range: 0-5 deg. Start at 0-2 deg.
     """
 
     # --- Frequency (Hz) ---
-    platform_motion_frequency_hz = 0.20
+    platform_motion_frequency_hz = 0.40
     """
     Base oscillation frequency in Hz for all platform motion components.
     Typical maritime-like range: 0.10-0.50 Hz.
     Higher frequency makes control harder and can destabilize training.
     """
 
-    platform_random_phase = True
+    platform_random_phase = False # Normally put this as rue
     """
     If True, each environment gets an independent random phase per motion axis.
     This prevents all envs moving in sync and improves robustness.

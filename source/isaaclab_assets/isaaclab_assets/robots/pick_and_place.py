@@ -3,24 +3,23 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Configuration for the quadcopters"""
+"""Configuration for a simple pick and place robot with a suction cup."""
 
 from __future__ import annotations
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.assets import ISAACLAB_NUCLEUS_DIR
 
 ##
 # Configuration
 ##
 
-CRAZYFLIE_CFG = ArticulationCfg(
+PICK_AND_PLACE_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"{ISAAC_NUCLEUS_DIR}/Robots/Bitcraze/Crazyflie/cf2x.usd",
-        scale= (3.0, 3.0, 3.0),
+        usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Tests/PickAndPlace/pick_and_place_robot.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,
             max_depenetration_velocity=10.0,
@@ -36,23 +35,35 @@ CRAZYFLIE_CFG = ArticulationCfg(
         copy_from_source=False,
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.5),
+        pos=(0.0, 0.0, 0.0),
         joint_pos={
-            ".*": 0.0,
-        },
-        joint_vel={
-            "m1_joint": 200.0,
-            "m2_joint": -200.0,
-            "m3_joint": 200.0,
-            "m4_joint": -200.0,
+            "x_axis": 0.0,
+            "y_axis": 0.0,
+            "z_axis": 0.0,
         },
     ),
     actuators={
-        "dummy": ImplicitActuatorCfg(
-            joint_names_expr=[".*"],
+        "x_gantry": ImplicitActuatorCfg(
+            joint_names_expr=["x_axis"],
+            effort_limit=400.0,
+            velocity_limit=10.0,
             stiffness=0.0,
-            damping=0.0,
+            damping=10.0,
+        ),
+        "y_gantry": ImplicitActuatorCfg(
+            joint_names_expr=["y_axis"],
+            effort_limit=400.0,
+            velocity_limit=10.0,
+            stiffness=0.0,
+            damping=10.0,
+        ),
+        "z_gantry": ImplicitActuatorCfg(
+            joint_names_expr=["z_axis"],
+            effort_limit=400.0,
+            velocity_limit=10.0,
+            stiffness=0.0,
+            damping=10.0,
         ),
     },
 )
-"""Configuration for the Crazyflie quadcopter."""
+"""Configuration for a simple pick and place robot with a suction cup."""
