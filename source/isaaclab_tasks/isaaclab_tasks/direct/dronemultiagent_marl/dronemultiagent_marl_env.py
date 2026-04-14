@@ -35,7 +35,8 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
     def __init__(self, cfg: DronemultiagentMarlEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-       
+        self._resolve_phase_settings()
+        self._print_phase_banner()
         # Boat movement parameters 
         self._platform_dx = torch.zeros(self.num_envs, device=self.device)
         self._platform_dy = torch.zeros(self.num_envs, device=self.device)
@@ -267,6 +268,58 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
+    def _resolve_phase_settings(self) -> None:
+        """Resolve curriculum/phase settings from cfg into runtime attributes."""
+
+        self._pace = int(getattr(self.cfg, "PACE", 0))
+        pace_key = str(self._pace)
+
+        pace_name_map = getattr(self.cfg, "PACE_NAME_MAP", {})
+        pace_desc_map = getattr(self.cfg, "PACE_PRESET_DESCRIPTIONS", {})
+
+        self._pace_name = pace_name_map.get(pace_key, f"PACE_{self._pace}")
+        self._pace_description = pace_desc_map.get(pace_key, "No description available.")
+
+        # High-level phase toggles
+        self._use_separated_training_boxes = bool(getattr(self.cfg, "USE_SEPARATED_TRAINING_BOXES", False))
+        self._use_shared_goal_logic = bool(getattr(self.cfg, "USE_SHARED_GOAL_LOGIC", True))
+        self._use_moving_goals = bool(getattr(self.cfg, "USE_MOVING_GOALS", False))
+        self._use_drone_goal = bool(getattr(self.cfg, "USE_DRONE_GOAL", True))
+        self._use_arm_goal = bool(getattr(self.cfg, "USE_ARM_GOAL", False))
+        self._use_magnet_logic = bool(getattr(self.cfg, "USE_MAGNET_LOGIC", True))
+        self._use_shared_success_condition = bool(getattr(self.cfg, "USE_SHARED_SUCCESS_CONDITION", True))
+
+        # Goal modes
+        self._drone_goal_mode = getattr(self.cfg, "DRONE_GOAL_MODE", "ee_tracking")
+        self._arm_goal_mode = getattr(self.cfg, "ARM_GOAL_MODE", "none")
+
+        # Disturbances
+        self._wind_enabled = bool(getattr(self.cfg, "enable_wind", True))
+        self._wind_gusts_enabled = bool(getattr(self.cfg, "enable_wind_gusts", True))
+        self._platform_motion_enabled = bool(getattr(self.cfg, "enable_platform_motion", False))
+
+        # Observation toggles
+        self._include_wind_in_obs = bool(getattr(self.cfg, "INCLUDE_WIND_IN_OBS", True))
+        self._include_cross_agent_info_in_obs = bool(getattr(self.cfg, "INCLUDE_CROSS_AGENT_INFO_IN_OBS", True))
+        self._include_goal_in_obs = bool(getattr(self.cfg, "INCLUDE_GOAL_IN_OBS", True))
+        self._include_goal_orientation_in_obs = bool(getattr(self.cfg, "INCLUDE_GOAL_ORIENTATION_IN_OBS", False))
+    
+    def _print_phase_banner(self) -> None:
+        if not getattr(self.cfg, "PRINT_PACE_COMMENTS", False):
+            return
+
+        print("=" * 80)
+        print(f"[PACE] Active phase: {self._pace}")
+        print(f"[PACE] Name: {self._pace_name}")
+        print(f"[PACE] Description: {self._pace_description}")
+        print(f"[PACE] Separated boxes: {self._use_separated_training_boxes}")
+        print(f"[PACE] Shared goal logic: {self._use_shared_goal_logic}")
+        print(f"[PACE] Drone goal mode: {self._drone_goal_mode}")
+        print(f"[PACE] Arm goal mode: {self._arm_goal_mode}")
+        print(f"[PACE] Wind enabled: {self._wind_enabled}")
+        print(f"[PACE] Wind gusts enabled: {self._wind_gusts_enabled}")
+        print(f"[PACE] Platform motion enabled: {self._platform_motion_enabled}")
+        print("=" * 80)
 
     # I will try to disable the ground collisions. 
     def _disable_ground_collisions(self, prim_path: str = "/World/ground"):
