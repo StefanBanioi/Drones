@@ -301,7 +301,9 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._pace_name = pace_name_map.get(pace_key, f"PACE_{self._pace}")
         self._pace_description = pace_desc_map.get(pace_key, "No description available.")
 
-        # High-level phase toggles
+        # ------------------------------------------------------------------
+        # Default behavior from cfg
+        # ------------------------------------------------------------------
         self._use_separated_training_boxes = bool(getattr(self.cfg, "USE_SEPARATED_TRAINING_BOXES", False))
         self._use_shared_goal_logic = bool(getattr(self.cfg, "USE_SHARED_GOAL_LOGIC", True))
         self._use_moving_goals = bool(getattr(self.cfg, "USE_MOVING_GOALS", False))
@@ -310,9 +312,33 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         self._use_magnet_logic = bool(getattr(self.cfg, "USE_MAGNET_LOGIC", True))
         self._use_shared_success_condition = bool(getattr(self.cfg, "USE_SHARED_SUCCESS_CONDITION", True))
 
-        # Goal modes
         self._drone_goal_mode = getattr(self.cfg, "DRONE_GOAL_MODE", "ee_tracking")
         self._arm_goal_mode = getattr(self.cfg, "ARM_GOAL_MODE", "none")
+
+        # ------------------------------------------------------------------
+        # Phase-specific overrides
+        # ------------------------------------------------------------------
+        if self._pace == 0:
+            self._use_separated_training_boxes = False
+            self._use_shared_goal_logic = True
+            self._use_moving_goals = False
+            self._use_drone_goal = True
+            self._use_arm_goal = False
+            self._use_magnet_logic = True
+            self._use_shared_success_condition = True
+            self._drone_goal_mode = "ee_tracking"
+            self._arm_goal_mode = "none"
+
+        elif self._pace == 1:
+            self._use_separated_training_boxes = True
+            self._use_shared_goal_logic = False
+            self._use_moving_goals = False
+            self._use_drone_goal = True
+            self._use_arm_goal = True
+            self._use_magnet_logic = False
+            self._use_shared_success_condition = False
+            self._drone_goal_mode = "static_world"
+            self._arm_goal_mode = "arm_sphere_pose"
 
         # Disturbances
         self._wind_enabled = bool(getattr(self.cfg, "enable_wind", True))
@@ -363,14 +389,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     def _update_phase_goals(self) -> None:
         """
         Update goal buffers according to the currently active PACE phase settings.
-
-        Current behavior:
-        - PACE 0 keeps the legacy setup:
-            drone goal = live UR10 end-effector position
-        - Arm goal buffers are initialized but not yet actively used.
-
-        This function exists so later PACE phases can switch goal logic cleanly
-        without hardcoding task assumptions inside _pre_physics_step().
         """
 
         ee_idx = self.ee_idx
@@ -386,7 +404,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             self._drone_goal_pos_w.copy_(ee_pos)
 
         elif self._drone_goal_mode == "static_world":
-            # Placeholder for future PACE phases.
+            # Static world goals are assigned during reset and stay unchanged during the episode.
             pass
 
         elif self._drone_goal_mode == "moving_world":
@@ -415,7 +433,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             self._arm_goal_quat_w.copy_(arm_goal_quat)
 
         elif self._arm_goal_mode == "arm_sphere_pose":
-            # Placeholder for future PACE arm curriculum goal logic.
+            # Static arm pose goals are assigned during reset and stay unchanged during the episode.
             pass
 
         else:
@@ -430,34 +448,50 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     def _reset_phase_goals(self, env_ids: torch.Tensor) -> None:
         """
         Reset goal buffers for the selected environments according to the active PACE phase.
-
-        Current behavior:
-        - PACE 0 keeps the legacy setup:
-            drone goal = current UR10 end-effector position
-            arm goal   = current UR10 end-effector pose
-
-        This function exists so later PACE phases can initialize:
-        - static drone goals
-        - moving-goal timers
-        - arm pose goals in a reachable sphere
-        - shared vs separated goal logic
         """
 
         ee_idx = self.ee_idx
 
-        # Current EE pose after reset
-        ee_pos = self._Ur10Arm.data.body_pos_w[env_ids, ee_idx, :]
-        ee_quat = self._Ur10Arm.data.body_quat_w[env_ids, ee_idx, :]
+        # ----------------------------
+        # PACE 0: legacy shared behavior
+        # ----------------------------
+        if self._pace == 0:
+            ee_pos = self._Ur10Arm.data.body_pos_w[env_ids, ee_idx, :]
+            ee_quat = self._Ur10Arm.data.body_quat_w[env_ids, ee_idx, :]
 
-        if ee_pos.ndim == 3:
-            ee_pos = ee_pos.squeeze(1)
-        if ee_quat.ndim == 3:
-            ee_quat = ee_quat.squeeze(1)
+            if ee_pos.ndim == 3:
+                ee_pos = ee_pos.squeeze(1)
+            if ee_quat.ndim == 3:
+                ee_quat = ee_quat.squeeze(1)
 
-        # PACE 0 behavior: keep goal tied to EE pose
-        self._drone_goal_pos_w[env_ids] = ee_pos
-        self._arm_goal_pos_w[env_ids] = ee_pos
-        self._arm_goal_quat_w[env_ids] = ee_quat
+            self._drone_goal_pos_w[env_ids] = ee_pos
+            self._arm_goal_pos_w[env_ids] = ee_pos
+            self._arm_goal_quat_w[env_ids] = ee_quat
+
+        # ----------------------------
+        # PACE 1: separated static goals
+        # ----------------------------
+        elif self._pace == 1:
+            drone_goal = self._sample_drone_static_goal(env_ids)
+            arm_goal_pos, arm_goal_quat = self._sample_arm_static_goal(env_ids)
+
+            self._drone_goal_pos_w[env_ids] = drone_goal
+            self._arm_goal_pos_w[env_ids] = arm_goal_pos
+            self._arm_goal_quat_w[env_ids] = arm_goal_quat
+
+        else:
+            # Fallback for phases not yet implemented
+            ee_pos = self._Ur10Arm.data.body_pos_w[env_ids, ee_idx, :]
+            ee_quat = self._Ur10Arm.data.body_quat_w[env_ids, ee_idx, :]
+
+            if ee_pos.ndim == 3:
+                ee_pos = ee_pos.squeeze(1)
+            if ee_quat.ndim == 3:
+                ee_quat = ee_quat.squeeze(1)
+
+            self._drone_goal_pos_w[env_ids] = ee_pos
+            self._arm_goal_pos_w[env_ids] = ee_pos
+            self._arm_goal_quat_w[env_ids] = ee_quat
 
         # Keep legacy compatibility alias synchronized
         self._desired_pos_w = self._drone_goal_pos_w
@@ -469,6 +503,83 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                 f"drone_goal_mean={self._drone_goal_pos_w[env_ids].mean(dim=0).tolist()} "
                 f"arm_goal_mean={self._arm_goal_pos_w[env_ids].mean(dim=0).tolist()}"
             )
+
+    def _get_drone_out_of_bounds(self) -> torch.Tensor:
+        """Check drone boundary violation based on current phase."""
+
+        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+
+        if self._use_separated_training_boxes:
+            x_min, x_max = self.cfg.drone_box_x_min, self.cfg.drone_box_x_max
+            y_min, y_max = self.cfg.drone_box_y_min, self.cfg.drone_box_y_max
+            z_min, z_max = self.cfg.drone_box_z_min, self.cfg.drone_box_z_max
+        else:
+            x_min, x_max = self.cfg.shared_box_x_min, self.cfg.shared_box_x_max
+            y_min, y_max = self.cfg.shared_box_y_min, self.cfg.shared_box_y_max
+            z_min, z_max = self.cfg.shared_box_z_min, self.cfg.shared_box_z_max
+
+        out = (
+            (drone_pos[:, 0] < x_min) | (drone_pos[:, 0] > x_max) |
+            (drone_pos[:, 1] < y_min) | (drone_pos[:, 1] > y_max) |
+            (drone_pos[:, 2] < z_min) | (drone_pos[:, 2] > z_max)
+        )
+
+        return out
+
+    def _get_arm_out_of_bounds(self) -> torch.Tensor:
+        """
+        For now:
+        - In PACE 0 → arm never dies independently
+        - Future: enforce workspace limits or stability checks
+        """
+        return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def _sample_drone_static_goal(self, env_ids: torch.Tensor) -> torch.Tensor:
+        """Sample static drone goals inside the configured drone training box."""
+        n = len(env_ids)
+        device = self.device
+
+        x = torch.empty(n, device=device).uniform_(
+            self.cfg.drone_box_x_min + self.cfg.reset_spawn_margin_xy,
+            self.cfg.drone_box_x_max - self.cfg.reset_spawn_margin_xy,
+        )
+        y = torch.empty(n, device=device).uniform_(
+            self.cfg.drone_box_y_min + self.cfg.reset_spawn_margin_xy,
+            self.cfg.drone_box_y_max - self.cfg.reset_spawn_margin_xy,
+        )
+        z = torch.empty(n, device=device).uniform_(
+            self.cfg.drone_box_z_min + self.cfg.reset_spawn_margin_z,
+            self.cfg.drone_box_z_max - self.cfg.reset_spawn_margin_z,
+        )
+
+        return torch.stack((x, y, z), dim=-1)
+
+    def _sample_arm_static_goal(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Sample static arm goals in a simple sphere-like reachable region around the UR10 base.
+        For now, orientation is identity quaternion.
+        """
+        n = len(env_ids)
+        device = self.device
+
+        base_pos = self._Ur10Arm.data.root_pos_w[env_ids, :3]
+
+        radius = torch.empty(n, device=device).uniform_(0.15, self.cfg.arm_goal_sphere_radius)
+        theta = torch.empty(n, device=device).uniform_(0.0, 2.0 * math.pi)
+
+        dx = radius * torch.cos(theta)
+        dy = radius * torch.sin(theta)
+        z = torch.empty(n, device=device).uniform_(self.cfg.arm_goal_min_height, self.cfg.arm_goal_max_height)
+
+        goal_pos = torch.zeros((n, 3), device=device)
+        goal_pos[:, 0] = base_pos[:, 0] + dx
+        goal_pos[:, 1] = base_pos[:, 1] + dy
+        goal_pos[:, 2] = z
+
+        goal_quat = torch.zeros((n, 4), device=device)
+        goal_quat[:, 0] = 1.0  # identity quaternion
+
+        return goal_pos, goal_quat
 
     # I will try to disable the ground collisions. 
     def _disable_ground_collisions(self, prim_path: str = "/World/ground"):
@@ -1149,7 +1260,8 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         y_oob = torch.logical_or(local_pos[:, 1] < -2.0, local_pos[:, 1] > 2.0)
         died_sideways = torch.logical_or(x_oob, y_oob)
         z_oob = torch.logical_or(drone_pos[:, 2] < 0.1, drone_pos[:, 2] > 2.0)
-        died = torch.logical_or(z_oob, died_sideways)
+        #died = torch.logical_or(z_oob, died_sideways)
+        died = self._get_drone_out_of_bounds()
         died_penalty = died.float() * self.cfg.died_penalty
 
         # Wrist joint elevation reward 
@@ -1268,35 +1380,55 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         return {"_Ur10Arm": ur10_total_reward, "_DroneRobot": drone_total_reward}
 
     def _get_dones(self) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+        """
+        Phase-aware termination logic.
+
+        Returns:
+            terminated: termination signals excluding timeout
+            time_outs: timeout signals only
+
+        PACE 0:
+        - Shared termination behavior
+
+        Future:
+        - Independent drone / arm termination behavior
+        """
+
+        # --- Boundary checks ---
+        drone_oob = self._get_drone_out_of_bounds()
+        arm_oob = self._get_arm_out_of_bounds()
+
+        # --- Timeout ---
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-      
-        # Get drone positions and environment origins
-        drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
-        env_origins = self._terrain.env_origins  # shape: (num_envs, 3)
 
-        # Compute position relative to the environment origin
-        local_pos = drone_pos - env_origins  # (num_envs, 3)
-       
-        # Basically a 4*4*2 box around the origin of the environment
-        # Apply local box bounds (e.g., within [-2, 2] in x and y)
-        x_out_of_bounds = torch.logical_or(local_pos[:, 0] < -2.5, local_pos[:, 0] > 2.5)
-        y_out_of_bounds = torch.logical_or(local_pos[:, 1] < -2.5, local_pos[:, 1] > 2.5)
-        died_sideways = torch.logical_or(x_out_of_bounds, y_out_of_bounds)
-        z_out_of_bounds = torch.logical_or(drone_pos[:, 2] < 0.3, drone_pos[:, 2] > 4.0)
-        died = torch.logical_or(z_out_of_bounds, died_sideways)
+        # ----------------------------
+        # SHARED termination (PACE 0 / shared phases)
+        # ----------------------------
+        if self._use_shared_success_condition:
+            terminated = {
+                "_DroneRobot": drone_oob,
+                "_Ur10Arm": drone_oob,
+            }
+            time_outs = {
+                "_DroneRobot": time_out,
+                "_Ur10Arm": time_out,
+            }
+            return terminated, time_outs
 
-
-        terminated = {
-            "_DroneRobot": died,
-            "_Ur10Arm": died,
-        }
-        time_outs = {
-            "_DroneRobot": time_out,
-            "_Ur10Arm": time_out,
-        }
-
-        return terminated, time_outs
-
+        # ----------------------------
+        # SEPARATED termination (future phases)
+        # ----------------------------
+        else:
+            terminated = {
+                "_DroneRobot": drone_oob,
+                "_Ur10Arm": arm_oob,
+            }
+            time_outs = {
+                "_DroneRobot": time_out,
+                "_Ur10Arm": time_out,
+            }
+            return terminated, time_outs
+    
     def _reset_idx(self, env_ids: torch.Tensor | None):
         # Normalize env_ids to a 1D tensor of indices
         if env_ids is None or len(env_ids) == self.num_envs:
