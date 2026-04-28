@@ -339,12 +339,17 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             self._use_shared_success_condition = False
             self._drone_goal_mode = "static_world"
             self._arm_goal_mode = "arm_sphere_pose"
+            # PACE 1 should be clean/static: no boat/platform motion yet.
+            self._platform_motion_enabled = False
 
         # Disturbances
         self._wind_enabled = bool(getattr(self.cfg, "enable_wind", True))
         self._wind_gusts_enabled = bool(getattr(self.cfg, "enable_wind_gusts", True))
-        self._platform_motion_enabled = bool(getattr(self.cfg, "enable_platform_motion", False))
-
+        if self._pace == 1:
+            self._platform_motion_enabled = False
+        else:
+            self._platform_motion_enabled = bool(getattr(self.cfg, "enable_platform_motion", False))
+       
         # Observation toggles
         self._include_wind_in_obs = bool(getattr(self.cfg, "INCLUDE_WIND_IN_OBS", True))
         self._include_cross_agent_info_in_obs = bool(getattr(self.cfg, "INCLUDE_CROSS_AGENT_INFO_IN_OBS", True))
@@ -505,26 +510,32 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             )
 
     def _get_drone_out_of_bounds(self) -> torch.Tensor:
-        """Check drone boundary violation based on current phase."""
+        """Check drone boundary violation in local environment coordinates."""
 
         drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
+        local_pos = drone_pos - self._terrain.env_origins
 
         if self._use_separated_training_boxes:
-            x_min, x_max = self.cfg.drone_box_x_min, self.cfg.drone_box_x_max
-            y_min, y_max = self.cfg.drone_box_y_min, self.cfg.drone_box_y_max
-            z_min, z_max = self.cfg.drone_box_z_min, self.cfg.drone_box_z_max
+            x_min = self.cfg.drone_side_x_center - self.cfg.side_half_width
+            x_max = self.cfg.drone_side_x_center + self.cfg.side_half_width
+            y_min = self.cfg.drone_box_y_min
+            y_max = self.cfg.drone_box_y_max
+            z_min = self.cfg.drone_box_z_min
+            z_max = self.cfg.drone_box_z_max
         else:
             x_min, x_max = self.cfg.shared_box_x_min, self.cfg.shared_box_x_max
             y_min, y_max = self.cfg.shared_box_y_min, self.cfg.shared_box_y_max
             z_min, z_max = self.cfg.shared_box_z_min, self.cfg.shared_box_z_max
 
-        out = (
-            (drone_pos[:, 0] < x_min) | (drone_pos[:, 0] > x_max) |
-            (drone_pos[:, 1] < y_min) | (drone_pos[:, 1] > y_max) |
-            (drone_pos[:, 2] < z_min) | (drone_pos[:, 2] > z_max)
-        )
+        x_oob = (local_pos[:, 0] < x_min) | (local_pos[:, 0] > x_max)
+        y_oob = (local_pos[:, 1] < y_min) | (local_pos[:, 1] > y_max)
+        z_oob_local = (local_pos[:, 2] < z_min) | (local_pos[:, 2] > z_max)
 
-        return out
+        # Emergency world-floor kill.
+        # This catches drones falling through the visual/disabled ground plane.
+        z_oob_world = drone_pos[:, 2] < getattr(self.cfg, "drone_world_z_kill", 0.05)
+
+        return x_oob | y_oob | z_oob_local | z_oob_world
 
     def _get_arm_out_of_bounds(self) -> torch.Tensor:
         """
@@ -535,13 +546,14 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def _sample_drone_static_goal(self, env_ids: torch.Tensor) -> torch.Tensor:
-        """Sample static drone goals inside the configured drone training box."""
+        """Sample static drone goals on the drone side of each environment."""
         n = len(env_ids)
         device = self.device
+        env_origins = self._terrain.env_origins[env_ids]
 
         x = torch.empty(n, device=device).uniform_(
-            self.cfg.drone_box_x_min + self.cfg.reset_spawn_margin_xy,
-            self.cfg.drone_box_x_max - self.cfg.reset_spawn_margin_xy,
+            self.cfg.drone_side_x_center - self.cfg.side_half_width,
+            self.cfg.drone_side_x_center + self.cfg.side_half_width,
         )
         y = torch.empty(n, device=device).uniform_(
             self.cfg.drone_box_y_min + self.cfg.reset_spawn_margin_xy,
@@ -552,34 +564,162 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             self.cfg.drone_box_z_max - self.cfg.reset_spawn_margin_z,
         )
 
-        return torch.stack((x, y, z), dim=-1)
+        goal = torch.zeros((n, 3), device=device)
+        goal[:, 0] = env_origins[:, 0] + x
+        goal[:, 1] = env_origins[:, 1] + y
+        goal[:, 2] = z
+
+        return goal
 
     def _sample_arm_static_goal(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Sample static arm goals in a simple sphere-like reachable region around the UR10 base.
+        Sample static arm goals on the arm side of each environment.
         For now, orientation is identity quaternion.
         """
         n = len(env_ids)
         device = self.device
+        env_origins = self._terrain.env_origins[env_ids]
 
-        base_pos = self._Ur10Arm.data.root_pos_w[env_ids, :3]
-
-        radius = torch.empty(n, device=device).uniform_(0.15, self.cfg.arm_goal_sphere_radius)
-        theta = torch.empty(n, device=device).uniform_(0.0, 2.0 * math.pi)
-
-        dx = radius * torch.cos(theta)
-        dy = radius * torch.sin(theta)
-        z = torch.empty(n, device=device).uniform_(self.cfg.arm_goal_min_height, self.cfg.arm_goal_max_height)
+        x = torch.empty(n, device=device).uniform_(
+            self.cfg.arm_side_x_center - self.cfg.side_half_width,
+            self.cfg.arm_side_x_center + self.cfg.side_half_width,
+        )
+        y = torch.empty(n, device=device).uniform_(
+            -self.cfg.side_half_width,
+            self.cfg.side_half_width,
+        )
+        z = torch.empty(n, device=device).uniform_(
+            self.cfg.arm_goal_min_height,
+            self.cfg.arm_goal_max_height,
+        )
 
         goal_pos = torch.zeros((n, 3), device=device)
-        goal_pos[:, 0] = base_pos[:, 0] + dx
-        goal_pos[:, 1] = base_pos[:, 1] + dy
+        goal_pos[:, 0] = env_origins[:, 0] + x
+        goal_pos[:, 1] = env_origins[:, 1] + y
         goal_pos[:, 2] = z
 
         goal_quat = torch.zeros((n, 4), device=device)
         goal_quat[:, 0] = 1.0  # identity quaternion
 
         return goal_pos, goal_quat
+    
+    def _compute_drone_reward_pace_1(
+        self,
+        lin_vel: torch.Tensor,
+        ang_vel: torch.Tensor,
+        drone_pos: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        PACE 1 drone reward:
+        - reach static goal
+        - stay alive / airborne
+        - avoid crazy velocities
+        - no alignment / magnet
+        """
+
+        distance_to_goal = torch.linalg.norm(self._drone_goal_pos_w - drone_pos, dim=1)
+        distance_to_goal_mapped = 1.0 - torch.tanh(distance_to_goal / 0.8)
+
+        is_close = distance_to_goal < 0.25
+        is_slow = lin_vel < 10.0
+
+        smooth_landing = (is_close & is_slow).float()
+        proximity = is_close.float()
+
+        died = self._get_drone_out_of_bounds()
+        died_penalty = died.float() * self.cfg.died_penalty
+
+        # Encourage not immediately falling / dying.
+        alive_reward = (~died).float() * 2.0 * self.step_dt
+
+        # Encourage staying in a useful flying height band.
+        z = drone_pos[:, 2]
+        height_good = ((z > 0.35) & (z < 1.8)).float()
+        height_reward = height_good * 3.0 * self.step_dt
+
+        time_shaping = 1.0 - (self.episode_length_buf / self.max_episode_length)
+
+        rewards = {
+            "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
+            "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
+            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "smooth_landing": smooth_landing * self.cfg.smooth_landing_bonus * self.step_dt,
+            "proximity": proximity * self.cfg.proximity_bonus * self.step_dt,
+            "time_shaping": time_shaping * self.cfg.time_bonus_scale * self.step_dt,
+            "alignment_reward": torch.zeros_like(distance_to_goal),
+            "magnet_reward": torch.zeros_like(distance_to_goal),
+            "died_penalty": died_penalty,
+        }
+
+        for k, v in rewards.items():
+            if k in self._episode_sums:
+                self._episode_sums[k] += v
+
+        drone_total_reward = (
+            rewards["lin_vel"]
+            + rewards["ang_vel"]
+            + rewards["distance_to_goal"]
+            + rewards["smooth_landing"]
+            + rewards["proximity"]
+            + rewards["time_shaping"]
+            + rewards["died_penalty"]
+            + alive_reward
+            + height_reward
+        )
+
+        return drone_total_reward
+
+    def _compute_arm_reward_pace_1(self) -> torch.Tensor:
+        """
+        PACE 1 arm reward:
+        - reach static arm goal position
+        - optionally keep joints calm
+        - no landing-pad support reward
+        """
+
+        ee_pos = self._Ur10Arm.data.body_pos_w[:, self.ee_idx, :]
+        ee_quat = self._Ur10Arm.data.body_quat_w[:, self.ee_idx, :]
+
+        if ee_pos.ndim == 3:
+            ee_pos = ee_pos.squeeze(1)
+        if ee_quat.ndim == 3:
+            ee_quat = ee_quat.squeeze(1)
+
+        arm_distance = torch.linalg.norm(self._arm_goal_pos_w - ee_pos, dim=1)
+        arm_distance_mapped = 1.0 - torch.tanh(arm_distance / 0.4)
+
+        # simple joint-motion penalty
+        arm_qd = self._Ur10Arm.data.joint_vel
+        arm_motion = torch.sum(arm_qd * arm_qd, dim=1)
+
+        # optional upright bonus can stay very small / zero-like for now
+        local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
+        ee_up = quat_apply(ee_quat, local_x)
+        z_alignment = ee_up[:, 2]
+
+        orientation_reward = z_alignment * self.cfg.orientation_reward_scale * 0.0 * self.step_dt
+
+        rewards = {
+            "orientation_reward": orientation_reward,
+            "wrist_height_reward": torch.zeros_like(arm_distance),
+            "arm_go_safe": arm_distance_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
+            "arm_hold_still": -self.cfg.arm_hold_still_scale * arm_motion.clamp(max=20.0) * self.step_dt,
+            "arm_near_jitter": torch.zeros_like(arm_distance),
+        }
+
+        for k, v in rewards.items():
+            if k in self._episode_sums:
+                self._episode_sums[k] += v
+
+        arm_total_reward = (
+            rewards["orientation_reward"]
+            + rewards["wrist_height_reward"]
+            + rewards["arm_go_safe"]
+            + rewards["arm_hold_still"]
+            + rewards["arm_near_jitter"]
+        )
+
+        return arm_total_reward
 
     # I will try to disable the ground collisions. 
     def _disable_ground_collisions(self, prim_path: str = "/World/ground"):
@@ -618,7 +758,7 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # -----------------------------------------------------------
         # Apply platform motion (boat-like) to UR10 base 
         # -----------------------------------------------------------
-        if getattr(self.cfg, "enable_platform_motion", False):
+        if self._platform_motion_enabled:
             dt = self.step_dt
             self._platform_time = self._platform_time + dt
 
@@ -855,35 +995,44 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         dt = self.step_dt
         device = self.device
 
-        self._update_wind(dt)  # <-- calls option A or B depending on RealisticWindYesOrNo
+        # -----------------------------------------------------------
+        # Wind / gusts controlled by PACE/config flags
+        # -----------------------------------------------------------
+        if self._wind_enabled:
+            self._update_wind(dt)
 
-        # build steady wind force (xy only)
-        self.wind_force[:, 0, 0] = self.wind_direction[:, 0] * self.wind_strength
-        self.wind_force[:, 0, 1] = self.wind_direction[:, 1] * self.wind_strength
-        self.wind_force[:, 0, 2] = 0.0
+            self.wind_force[:, 0, 0] = self.wind_direction[:, 0] * self.wind_strength
+            self.wind_force[:, 0, 1] = self.wind_direction[:, 1] * self.wind_strength
+            self.wind_force[:, 0, 2] = 0.0
+        else:
+            self.wind_force.zero_()
 
-        # === Gusts ===
-        self.wind_gust_timer -= dt
-        self.wind_gust_cooldown -= dt
+        if self._wind_gusts_enabled:
+            self.wind_gust_timer -= dt
+            self.wind_gust_cooldown -= dt
 
-        end_gust = self.wind_gust_timer <= 0
-        if end_gust.any():
-            self.active_wind_force[end_gust] = 0.0
+            end_gust = self.wind_gust_timer <= 0
+            if end_gust.any():
+                self.active_wind_force[end_gust] = 0.0
 
-        can_gust = self.wind_gust_cooldown <= 0
-        trigger_gust = can_gust & (torch.rand(self.num_envs, device=device) < 0.02)
+            can_gust = self.wind_gust_cooldown <= 0
+            trigger_gust = can_gust & (torch.rand(self.num_envs, device=device) < 0.02)
 
-        suppress_after_win = getattr(self.cfg, "suppress_gusts_on_win", True)
-        eligible = (~self._winning_condition) if suppress_after_win else torch.ones_like(self._winning_condition)
+            suppress_after_win = getattr(self.cfg, "suppress_gusts_on_win", True)
+            eligible = (~self._winning_condition) if suppress_after_win else torch.ones_like(self._winning_condition)
 
-        if trigger_gust.any():
-            tg = trigger_gust & eligible
-            if tg.any():
-                gust_dirs = torch.nn.functional.normalize(torch.randn_like(self.active_wind_force), dim=-1)
-                gust_mags = torch.empty((self.num_envs, 1, 1), device=device).uniform_(0.1, 0.3)
-                self.active_wind_force[tg] = gust_dirs[tg] * gust_mags[tg]
-                self.wind_gust_timer[tg] = torch.randint(15, 40, (tg.sum(),), device=device) * dt
-                self.wind_gust_cooldown[tg] = torch.randint(100, 300, (tg.sum(),), device=device) * dt
+            if trigger_gust.any():
+                tg = trigger_gust & eligible
+                if tg.any():
+                    gust_dirs = torch.nn.functional.normalize(torch.randn_like(self.active_wind_force), dim=-1)
+                    gust_mags = torch.empty((self.num_envs, 1, 1), device=device).uniform_(0.1, 0.3)
+                    self.active_wind_force[tg] = gust_dirs[tg] * gust_mags[tg]
+                    self.wind_gust_timer[tg] = torch.randint(15, 40, (tg.sum(),), device=device) * dt
+                    self.wind_gust_cooldown[tg] = torch.randint(100, 300, (tg.sum(),), device=device) * dt
+        else:
+            self.wind_gust_timer.zero_()
+            self.wind_gust_cooldown.zero_()
+            self.active_wind_force.zero_()
 
 
         # apply combined wind + thrust/torque to ALL envs (no "magnetized" split)
@@ -1147,46 +1296,60 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
     def _get_rewards(self) -> dict[str, torch.Tensor]:
         """
-        Multi-agent rewards aligned with the latest single-agent logic.
-        Returns per-actor rewards: {"_Ur10Arm": ur10_reward, "_DroneRobot": drone_reward}
+        Phase-aware multi-agent rewards.
         """
 
         # ----------------------------
-        # Shared signals (computed once)
+        # Shared signals
         # ----------------------------
-        # Drone dynamics
         lin_vel = torch.sum(torch.square(self._DroneRobot.data.root_lin_vel_b), dim=1)
         ang_vel = torch.sum(torch.square(self._DroneRobot.data.root_ang_vel_b), dim=1)
 
         drone_pos = self._DroneRobot.data.root_pos_w[:, :3]
         drone_quat = self._DroneRobot.data.root_quat_w
 
-        # UR10 EE pose
-        # ee_idx = self._Ur10Arm.find_bodies("ee_link")[0]
-        # ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_idx, :]
-        # ee_quat = self._Ur10Arm.data.body_quat_w[:, ee_idx, :]  # [N, 4]
         ee_idx = self.ee_idx
         ee_pos = self._Ur10Arm.data.body_pos_w[:, ee_idx, :]
-        ee_quat = self._Ur10Arm.data.body_quat_w[:, ee_idx, :]  # [N, 4]
+        ee_quat = self._Ur10Arm.data.body_quat_w[:, ee_idx, :]
 
-        # Goal distance (drone -> desired pos) 
-        #distance_to_goal = torch.linalg.norm(self._desired_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
+        if ee_pos.ndim == 3:
+            ee_pos = ee_pos.squeeze(1)
+        if ee_quat.ndim == 3:
+            ee_quat = ee_quat.squeeze(1)
+
+        # ============================================================
+        # PACE 1: separated static-goal training
+        # ============================================================
+        if self._pace == 1:
+            drone_total_reward = self._compute_drone_reward_pace_1(
+                lin_vel=lin_vel,
+                ang_vel=ang_vel,
+                drone_pos=drone_pos,
+            )
+
+            arm_total_reward = self._compute_arm_reward_pace_1()
+
+            return {
+                "_Ur10Arm": arm_total_reward,
+                "_DroneRobot": drone_total_reward,
+            }
+
+        # ============================================================
+        # PACE 0: legacy shared landing behavior
+        # ============================================================
         distance_to_goal = torch.linalg.norm(self._drone_goal_pos_w - self._DroneRobot.data.root_pos_w, dim=1)
         distance_to_goal_mapped = 1 - torch.tanh(distance_to_goal / 0.8)
 
-        # Smooth landing & proximity 
         is_close = distance_to_goal < 0.25
         is_slow = lin_vel < 10
         smooth_landing = (is_close & is_slow).float()
         proximity = (distance_to_goal < 0.25).float()
 
-        # Alignment between drone up and EE up-reference 
         drone_up = quat_apply(
             drone_quat,
             torch.tensor([0.0, 0.0, 1.0], device=drone_quat.device, dtype=drone_quat.dtype).expand(self.num_envs, 3)
         )
 
-        # Try all three local axes to visualize; we’ll use X as up-reference 
         local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
         local_y = torch.tensor([0, 1, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
         local_z = torch.tensor([0, 0, 1], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
@@ -1198,112 +1361,67 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         ee_up = world_x
 
-        # Alignment (cosine similarity) and gating by approach zone
         alignment = torch.sum(drone_up * ee_up, dim=1)
         aligned_enough = alignment > self.cfg.alignment_threshold
         in_approach_zone = distance_to_goal < self.cfg.approach_zone
         alignment_reward = (alignment * self.cfg.alignment_reward * self.step_dt) * in_approach_zone.float()
 
-        # Magnet condition counters
         magnet_condition_raw = (
             (distance_to_goal < self.cfg.magnet_condition_distance)
             & (lin_vel < self.cfg.magnet_condition_max_speed)
             & aligned_enough
         )
-        
-        # --- STORE OLD COUNTER FOR DEBUG ---
-        prev_magnet_counter = self._magnet_condition_counter.clone()
 
-        # --- UPDATE MAGNET COUNTER ---
         self._magnet_condition_counter = torch.where(
             magnet_condition_raw,
             self._magnet_condition_counter + 1,
             torch.zeros_like(self._magnet_condition_counter)
         )
-        # --- FINAL MAGNET CONDITION ---
+
         magnet_condition = self._magnet_condition_counter >= self._magnet_required_steps
-       
-        # --- MAGNET REWARD --- 
         magnet_reward = magnet_condition.float() * self.cfg.magnet_reward * self.step_dt
+        self._winning_condition |= magnet_condition
 
-        # --- WINNING CONDITION ---
-        self._winning_condition |= magnet_condition  # keep your success flag behavior
-
-        # Time shaping (same direction/sign as single-agent dict term)
         time_shaping = (1.0 - (self.episode_length_buf / self.max_episode_length))
 
-        # Orientation reward for UR10: EE "up" wrt world Z 
-        z_alignment = ee_up[:, 2]                    # [-1, 1], higher is better
-        self._ee_alignment = z_alignment             # for debugging
-        orientation_reward = z_alignment * self.cfg.orientation_reward_scale  # scale now; dt later in dict
+        z_alignment = ee_up[:, 2]
+        self._ee_alignment = z_alignment
+        orientation_reward = z_alignment * self.cfg.orientation_reward_scale
 
-        # ----------------------------
-        # NEW: Far/near gating + "safe pose then hold"
-        # ----------------------------
         near = in_approach_zone.float()
         far = 1.0 - near
 
-        # "Safe enough" threshold: how upright the pad must be to be considered safe
-        safe_thr = getattr(self.cfg, "safe_z_alignment_threshold", 0.90)  # default if not in cfg
+        safe_thr = getattr(self.cfg, "safe_z_alignment_threshold", 0.90)
         safe = (z_alignment > safe_thr).float()
 
-        # Arm motion measure (penalize physical motion). This is robust and hard to exploit.
-        arm_qd = self._Ur10Arm.data.joint_vel  # [N, num_joints]
-        arm_motion = torch.sum(arm_qd * arm_qd, dim=1)  # [N]
+        arm_qd = self._Ur10Arm.data.joint_vel
+        arm_motion = torch.sum(arm_qd * arm_qd, dim=1)
 
-
-
-        # Bounds / death penalty 
-        env_origins = self._terrain.env_origins  # (num_envs, 3)
-        local_pos = drone_pos - env_origins
-        x_oob = torch.logical_or(local_pos[:, 0] < -2.0, local_pos[:, 0] > 2.0)
-        y_oob = torch.logical_or(local_pos[:, 1] < -2.0, local_pos[:, 1] > 2.0)
-        died_sideways = torch.logical_or(x_oob, y_oob)
-        z_oob = torch.logical_or(drone_pos[:, 2] < 0.1, drone_pos[:, 2] > 2.0)
-        #died = torch.logical_or(z_oob, died_sideways)
         died = self._get_drone_out_of_bounds()
         died_penalty = died.float() * self.cfg.died_penalty
 
-        # Wrist joint elevation reward 
         z_threshold = self.cfg.wrist_height_penalty_scale
-        # w1 = self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies("wrist_1_link")[0], 2]
-        # w2 = self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies("wrist_2_link")[0], 2]
-        # w3 = self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies("wrist_3_link")[0], 2]
         w1 = self._Ur10Arm.data.body_pos_w[:, self.wrist_1_idx, 2]
         w2 = self._Ur10Arm.data.body_pos_w[:, self.wrist_2_idx, 2]
         w3 = self._Ur10Arm.data.body_pos_w[:, self.wrist_3_idx, 2]
-        
+
         w1_above = (w1 > z_threshold).float()
         w2_above = (w2 > z_threshold).float()
         w3_above = (w3 > z_threshold).float()
 
         wrist_height_score = (w1_above + w2_above + w3_above) / 3.0
-        wrist_above = w1_above + w2_above + w3_above
-        wrist_below = 3.0 - wrist_above
-
-        wrist_reward = (
-            wrist_above * self.cfg.wrist_height_reward_scale
-            - wrist_below * self.cfg.wrist_height_penalty_scale
-        ) * self.step_dt
-
         wrist_reward = (wrist_height_score * self.cfg.wrist_height_reward_scale * self.step_dt).squeeze(-1)
 
-        # Episode diagnostics 
         if torch.rand(1).item() < 0.05:
             print(f"[DEBUG] dist: {distance_to_goal.mean():.3f}, vel: {lin_vel.mean():.3f}, ang_vel: {ang_vel.mean():.3f}")
             print(f"[DEBUG] drone Z: {self._DroneRobot.data.root_pos_w[:, 2].mean():.3f}")
-            #print(f"[DEBUG] ee_link Z: {self._Ur10Arm.data.body_pos_w[:, self._Ur10Arm.find_bodies('ee_link')[0], 2].mean():.3f}")
             print(f"[DEBUG] ee_link Z: {self._Ur10Arm.data.body_pos_w[:, self.ee_idx, 2].mean():.3f}")
             print(f"[DEBUG] Orientation reward mean: {(orientation_reward * self.step_dt).mean():.3f}")
-
-        # Track "landing condition" 
+            print(f"[DEBUG] wind_enabled={self._wind_enabled}, gusts={self._wind_gusts_enabled}, wind_mean={self.wind_force.mean():.4f}")
+        
         self._episode_success_flags |= (is_close & is_slow)
 
-        # ----------------------------
-        # Compose per-term reward dict (for logging parity)
-        # ----------------------------
         rewards = {
-            # Drone-centric
             "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
             "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
             "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
@@ -1312,41 +1430,26 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             "time_shaping": time_shaping * self.cfg.time_bonus_scale * self.step_dt,
             "alignment_reward": alignment_reward,
             "magnet_reward": magnet_reward,
-
-            # # UR10-centric
             "orientation_reward": orientation_reward * self.step_dt,
             "wrist_height_reward": wrist_reward,
-            # ----------------------------
-            # NEW: UR10 safe-then-hold shaping
-            # ----------------------------
             "arm_go_safe": (
                 getattr(self.cfg, "arm_go_safe_scale", 1.0)
                 * far * (1.0 - safe) * z_alignment * self.step_dt
             ),
-
             "arm_hold_still": (
                 -getattr(self.cfg, "arm_hold_still_scale", 0.5)
                 * far * safe * arm_motion * self.step_dt
             ),
-
-            # optional: small anti-jitter penalty when near (keeps it from vibrating)
             "arm_near_jitter": (
                 -getattr(self.cfg, "arm_near_jitter_scale", 0.05)
                 * near * arm_motion * self.step_dt
             ),
-
-            # Shared penalty
             "died_penalty": died_penalty,
         }
 
-        # Log episode sums
         for k, v in rewards.items():
             self._episode_sums[k] += v
 
-        # ----------------------------
-        # Split into multi-agent totals
-        # ----------------------------
-        # Drone gets: motion shaping + approach + alignment/magnet + time + penalties
         drone_total_reward = (
             rewards["lin_vel"]
             + rewards["ang_vel"]
@@ -1359,14 +1462,8 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             + rewards["died_penalty"]
         )
 
-        # ur10_total_reward = (
-        #     rewards["orientation_reward"]
-        #     + rewards["wrist_height_reward"]
-        #     + rewards["distance_to_goal"]   # encourages the arm to “meet” the drone
-        # )
-        # Only encourage "meeting" the drone when it is close enough to matter
         ur10_help_distance = rewards["distance_to_goal"] * near
-        
+
         ur10_total_reward = (
             rewards["orientation_reward"]
             + rewards["wrist_height_reward"]
@@ -1375,7 +1472,6 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             + rewards["arm_hold_still"]
             + rewards["arm_near_jitter"]
         )
-
 
         return {"_Ur10Arm": ur10_total_reward, "_DroneRobot": drone_total_reward}
 
@@ -1590,10 +1686,32 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         drone_default_root_state = self._DroneRobot.data.default_root_state[env_ids].clone()
 
 
+        # drone_default_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        # drone_default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
+        # drone_default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
+        # drone_default_root_state[:, 2] += torch.zeros(len(env_ids), device=device).uniform_(0.0, 0.5)
+
         drone_default_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        drone_default_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
-        drone_default_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.5, 0.5)
-        drone_default_root_state[:, 2] += torch.zeros(len(env_ids), device=device).uniform_(0.0, 0.5)
+
+        if self._use_separated_training_boxes:
+            n = len(env_ids)
+
+            drone_default_root_state[:, 0] += torch.empty(n, device=device).uniform_(
+                self.cfg.drone_side_x_center - self.cfg.side_half_width,
+                self.cfg.drone_side_x_center + self.cfg.side_half_width,
+            )
+            drone_default_root_state[:, 1] += torch.empty(n, device=device).uniform_(
+                self.cfg.drone_box_y_min + self.cfg.reset_spawn_margin_xy,
+                self.cfg.drone_box_y_max - self.cfg.reset_spawn_margin_xy,
+            )
+            drone_default_root_state[:, 2] += torch.empty(n, device=device).uniform_(
+                self.cfg.drone_box_z_min + self.cfg.reset_spawn_margin_z,
+                self.cfg.drone_box_z_max - self.cfg.reset_spawn_margin_z,
+            )
+        else:
+            drone_default_root_state[:, 0] += torch.empty(len(env_ids), device=device).uniform_(-0.5, 0.5)
+            drone_default_root_state[:, 1] += torch.empty(len(env_ids), device=device).uniform_(-0.5, 0.5)
+            drone_default_root_state[:, 2] += torch.empty(len(env_ids), device=device).uniform_(0.0, 0.5)
 
         self._DroneRobot.write_root_pose_to_sim(drone_default_root_state[:, :7], env_ids)
         self._DroneRobot.write_root_velocity_to_sim(drone_default_root_state[:, 7:], env_ids)
@@ -1601,9 +1719,23 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
         # --- UR10 root state (single source of truth) ---
         ur10_root_state = self._Ur10Arm.data.default_root_state[env_ids].clone()
+        # ur10_root_state[:, :3] += self._terrain.env_origins[env_ids]
+        # ur10_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+        # ur10_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+
         ur10_root_state[:, :3] += self._terrain.env_origins[env_ids]
-        ur10_root_state[:, 0] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
-        ur10_root_state[:, 1] += torch.zeros(len(env_ids), device=device).uniform_(-0.2, 0.2)
+
+        if self._use_separated_training_boxes:
+            n = len(env_ids)
+
+            ur10_root_state[:, 0] += torch.empty(n, device=device).uniform_(
+                self.cfg.arm_side_x_center - 0.20,
+                self.cfg.arm_side_x_center + 0.20,
+            )
+            ur10_root_state[:, 1] += torch.empty(n, device=device).uniform_(-0.20, 0.20)
+        else:
+            ur10_root_state[:, 0] += torch.empty(len(env_ids), device=device).uniform_(-0.2, 0.2)
+            ur10_root_state[:, 1] += torch.empty(len(env_ids), device=device).uniform_(-0.2, 0.2)
 
         # Deterministic joint reset
         joint_pos = self._Ur10Arm.data.default_joint_pos[env_ids].clone()
@@ -1628,12 +1760,28 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         """Create/toggle debug markers."""
         if debug_vis:
             # --- Goal marker ---
+            # if not hasattr(self, "goal_pos_visualizer"):
+            #     marker_cfg = CUBOID_MARKER_CFG.copy()
+            #     marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
+            #     marker_cfg.prim_path = "/Visuals/Command/goal_position"
+            #     self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
+            # self.goal_pos_visualizer.set_visibility(True)
+
+            # --- Drone goal marker ---
             if not hasattr(self, "goal_pos_visualizer"):
                 marker_cfg = CUBOID_MARKER_CFG.copy()
                 marker_cfg.markers["cuboid"].size = (0.05, 0.05, 0.05)
-                marker_cfg.prim_path = "/Visuals/Command/goal_position"
+                marker_cfg.prim_path = "/Visuals/Command/drone_goal_position"
                 self.goal_pos_visualizer = VisualizationMarkers(marker_cfg)
             self.goal_pos_visualizer.set_visibility(True)
+
+            # --- Arm goal marker ---
+            if not hasattr(self, "arm_goal_visualizer"):
+                arm_marker_cfg = CUBOID_MARKER_CFG.copy()
+                arm_marker_cfg.markers["cuboid"].size = (0.07, 0.07, 0.07)
+                arm_marker_cfg.prim_path = "/Visuals/Command/arm_goal_position"
+                self.arm_goal_visualizer = VisualizationMarkers(arm_marker_cfg)
+            self.arm_goal_visualizer.set_visibility(True)
 
             # --- End-effector frame marker ---
             if not hasattr(self, "ee_frame_visualizer"):
@@ -1677,6 +1825,8 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             # turn everything off
             if hasattr(self, "goal_pos_visualizer"):
                 self.goal_pos_visualizer.set_visibility(False)
+            if hasattr(self, "arm_goal_visualizer"):
+                self.arm_goal_visualizer.set_visibility(False)
             if hasattr(self, "ee_frame_visualizer"):
                 self.ee_frame_visualizer.set_visibility(False)
             if hasattr(self, "wind_markers"):
@@ -1686,10 +1836,19 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
 
     def _debug_vis_callback(self, event):
         """Update debug markers each frame."""
-        # --- Goal marker ---
+        # # --- Goal marker ---
+        # if hasattr(self, "goal_pos_visualizer"):
+        #     #self.goal_pos_visualizer.visualize(self._desired_pos_w)
+        #     self.goal_pos_visualizer.visualize(self._drone_goal_pos_w)
+        
+        # --- Drone goal marker ---
         if hasattr(self, "goal_pos_visualizer"):
-            #self.goal_pos_visualizer.visualize(self._desired_pos_w)
             self.goal_pos_visualizer.visualize(self._drone_goal_pos_w)
+
+        # --- Arm goal marker ---
+        if hasattr(self, "arm_goal_visualizer"):
+            self.arm_goal_visualizer.visualize(self._arm_goal_pos_w)
+
 
         # --- Existing success/failure print (optional; can be noisy) ---
         status = self._success_status.cpu().numpy()

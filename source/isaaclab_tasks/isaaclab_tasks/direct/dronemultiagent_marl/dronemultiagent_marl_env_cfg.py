@@ -73,7 +73,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # =====================================================================
 
     decimation = 2
-    episode_length_s = 2.0 #was 6 seconds then 3 seconds now 2
+    episode_length_s = 3.0 #was 6 seconds then 3 seconds now 2
     debug_vis = True  
 
     # multi-agent specification and spaces definition
@@ -85,10 +85,10 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     state_space = 54  # sum of global state dims
       
     # Optional curriculum-level debug comments
-    PACE = 0
+    PACE = 1
     PRINT_PACE_COMMENTS = True
-    PRINT_PACE_ON_RESET = False
-    PRINT_PACE_GOAL_UPDATES = False
+    PRINT_PACE_ON_RESET = True
+    PRINT_PACE_GOAL_UPDATES = True
 
     # Human-readable phase names for logging / debugging
     PACE_NAME_MAP = {
@@ -281,7 +281,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     drone_box_x_max = 2.0
     drone_box_y_min = -2.0
     drone_box_y_max = 2.0
-    drone_box_z_min = 0.1
+    drone_box_z_min = 0.25
     drone_box_z_max = 2.0
 
     # Future separated arm workspace / goal region
@@ -289,9 +289,19 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     arm_goal_min_height = 0.10
     arm_goal_max_height = 1.50
 
+    # Per-environment side split for separated PACE phases
+    # Negative X side = drone side
+    # Positive X side = arm side
+    drone_side_x_center = -1.0
+    arm_side_x_center = 1.0
+    side_half_width = 0.60
+
     # Spawn safety margin from boundaries
     reset_spawn_margin_xy = 0.05
-    reset_spawn_margin_z = 0.05
+    reset_spawn_margin_z = 0.10
+    # Emergency world-Z kill switch for disabled-ground setups.
+    # If the drone falls below this absolute world Z, terminate/reset it.
+    drone_world_z_kill = 0.05
 
     # =====================================================================
     # 9) RESET SETTINGS
@@ -316,7 +326,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # 10) PLATFORM MOTION / WAVE SETTINGS
     # =====================================================================
 
-    enable_platform_motion = True
+    enable_platform_motion = False #True
     """
     If True, applies a smooth, kinematic motion to the UR10 *base* each simulation step.
     This approximates boat/deck motion (heave/sway/surge + optional pitch/roll) without
@@ -388,8 +398,8 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     alignment_reward = 25                   # Now more than ever, we want the drone to be aligned with the arm's end-effector (Previously it was 0 as the arm immediately was in the correct initial position)                   
     magnet_reward = 10000                  
 
-    lin_vel_reward_scale = 0                # Penalize high linear velocity (drone) used to be 1.5 ->10
-    ang_vel_reward_scale = 0                # Penalize angular velocity (drone)   used to be -0.1 -> 1.10
+    lin_vel_reward_scale = -0.03                # Penalize high linear velocity (drone) used to be 1.5 ->10
+    ang_vel_reward_scale = -0.01               # Penalize angular velocity (drone)   used to be -0.1 -> 1.10
 
     # ---------------------------------------------------------------------
     # Arm reward terms
@@ -406,7 +416,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # Shared / penalty terms
     # ---------------------------------------------------------------------
     time_penalty = -0.01                   # Per-step penalty to encourage speed
-    died_penalty = 0.0                   # Penalty for going out of bounds used to be -100.0 -> -10.0
+    died_penalty = -50.0                   # Penalty for going out of bounds used to be -100.0 -> -10.0
     dist_reward_boost_near = 1.0
 
     # ---------------------------------------------------------------------
@@ -443,8 +453,8 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # For PACE readiness, keep the old wind system but document it better.
     # Later phases can simply enable/disable these from phase logic.
 
-    enable_wind = True
-    enable_wind_gusts = True
+    enable_wind = False #True
+    enable_wind_gusts = False #True
 
     # wind scale for no wind 
     lower_wind_scale = 0.0
