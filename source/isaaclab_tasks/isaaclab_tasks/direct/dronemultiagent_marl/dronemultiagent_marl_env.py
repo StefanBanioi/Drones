@@ -227,6 +227,9 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         if torch.rand(1).item() < 0.01:
             print(f"[DEBUG] drone_goal_pos_w avg Z: {self._drone_goal_pos_w[:, 2].mean():.3f}")
 
+        # PACE reward progress buffers
+        self._prev_drone_goal_distance = torch.zeros(self.num_envs, device=self.device)
+        self._prev_arm_goal_distance = torch.zeros(self.num_envs, device=self.device)
         
         # Logging
         self._episode_sums = {
@@ -501,6 +504,19 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # Keep legacy compatibility alias synchronized
         self._desired_pos_w = self._drone_goal_pos_w
 
+        # Reset progress tracking after goals have been assigned
+        drone_pos = self._DroneRobot.data.root_pos_w[env_ids, :3]
+        ee_pos = self._Ur10Arm.data.body_pos_w[env_ids, self.ee_idx, :]
+        if ee_pos.ndim == 3:
+            ee_pos = ee_pos.squeeze(1)
+
+        self._prev_drone_goal_distance[env_ids] = torch.linalg.norm(
+            self._drone_goal_pos_w[env_ids] - drone_pos, dim=1
+        )
+        self._prev_arm_goal_distance[env_ids] = torch.linalg.norm(
+            self._arm_goal_pos_w[env_ids] - ee_pos, dim=1
+        )
+
         if getattr(self.cfg, "PRINT_PACE_ON_RESET", False):
             print(
                 f"[PACE][RESET] phase={self._pace} "
@@ -611,41 +627,42 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
     ) -> torch.Tensor:
         """
         PACE 1 drone reward:
-        - reach static goal
-        - stay alive / airborne
-        - avoid crazy velocities
-        - no alignment / magnet
+        - main objective: reduce distance to static goal
+        - terminate/fail if out of bounds
+        - only punish angular velocity when it becomes excessive
         """
 
         distance_to_goal = torch.linalg.norm(self._drone_goal_pos_w - drone_pos, dim=1)
-        distance_to_goal_mapped = 1.0 - torch.tanh(distance_to_goal / 0.8)
 
-        is_close = distance_to_goal < 0.25
-        is_slow = lin_vel < 10.0
+        # Main reward: closer to goal = better
+        #distance_reward = (1.0 - torch.tanh(distance_to_goal / 0.8)) * self.cfg.distance_to_goal_reward_scale * self.step_dt
+        distance_reward = -distance_to_goal
+        
+        # Progress reward: only rewards actually moving closer
+        progress = self._prev_drone_goal_distance - distance_to_goal
+        progress_reward = progress.clamp(-0.05, 0.05) * 50.0
+        self._prev_drone_goal_distance = distance_to_goal.detach()
 
-        smooth_landing = (is_close & is_slow).float()
-        proximity = is_close.float()
+        # Sparse goal bonus
+        goal_reached = distance_to_goal < 0.25
+        goal_bonus = goal_reached.float() * 100.0 * self.step_dt
 
+        # Death penalty
         died = self._get_drone_out_of_bounds()
         died_penalty = died.float() * self.cfg.died_penalty
 
-        # Encourage not immediately falling / dying.
-        alive_reward = (~died).float() * 2.0 * self.step_dt
-
-        # Encourage staying in a useful flying height band.
-        z = drone_pos[:, 2]
-        height_good = ((z > 0.35) & (z < 1.8)).float()
-        height_reward = height_good * 3.0 * self.step_dt
-
-        time_shaping = 1.0 - (self.episode_length_buf / self.max_episode_length)
+        # Only punish angular velocity if it is excessive.
+        # This avoids teaching the drone to stay rigid forever.
+        excessive_ang_vel = torch.clamp(ang_vel - 8.0, min=0.0)
+        excessive_ang_vel_penalty = -0.02 * excessive_ang_vel * self.step_dt
 
         rewards = {
-            "lin_vel": lin_vel * self.cfg.lin_vel_reward_scale * self.step_dt,
-            "ang_vel": ang_vel * self.cfg.ang_vel_reward_scale * self.step_dt,
-            "distance_to_goal": distance_to_goal_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
-            "smooth_landing": smooth_landing * self.cfg.smooth_landing_bonus * self.step_dt,
-            "proximity": proximity * self.cfg.proximity_bonus * self.step_dt,
-            "time_shaping": time_shaping * self.cfg.time_bonus_scale * self.step_dt,
+            "lin_vel": torch.zeros_like(distance_to_goal),
+            "ang_vel": excessive_ang_vel_penalty,
+            "distance_to_goal": distance_reward,
+            "smooth_landing": torch.zeros_like(distance_to_goal),
+            "proximity": goal_bonus,
+            "time_shaping": progress_reward,
             "alignment_reward": torch.zeros_like(distance_to_goal),
             "magnet_reward": torch.zeros_like(distance_to_goal),
             "died_penalty": died_penalty,
@@ -655,72 +672,69 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
             if k in self._episode_sums:
                 self._episode_sums[k] += v
 
-        drone_total_reward = (
-            rewards["lin_vel"]
-            + rewards["ang_vel"]
-            + rewards["distance_to_goal"]
-            + rewards["smooth_landing"]
-            + rewards["proximity"]
-            + rewards["time_shaping"]
-            + rewards["died_penalty"]
-            + alive_reward
-            + height_reward
-        )
+        if torch.rand(1).item() < 0.002:
+            print(
+                f"[DRONE DEBUG] "
+                f"dist_mean={distance_to_goal.mean().item():.3f}, "
+                f"goal_rel_mean={(self._drone_goal_pos_w - drone_pos).mean(dim=0).tolist()}, "
+                f"reward_mean={distance_reward.mean().item():.3f}, "
+                f"thrust_mean={self._actions['_DroneRobot'][:, 0].mean().item():.3f}"
+            )        
 
-        return drone_total_reward
+
+        return (
+            rewards["distance_to_goal"]
+            + rewards["time_shaping"]
+            + rewards["proximity"]
+            + rewards["ang_vel"]
+            + rewards["died_penalty"]
+        )
 
     def _compute_arm_reward_pace_1(self) -> torch.Tensor:
         """
         PACE 1 arm reward:
-        - reach static arm goal position
-        - optionally keep joints calm
-        - no landing-pad support reward
+        - reward moving EE closer to static arm goal
+        - reward being near the goal
+        - softly discourage jitter
         """
 
         ee_pos = self._Ur10Arm.data.body_pos_w[:, self.ee_idx, :]
-        ee_quat = self._Ur10Arm.data.body_quat_w[:, self.ee_idx, :]
-
         if ee_pos.ndim == 3:
             ee_pos = ee_pos.squeeze(1)
-        if ee_quat.ndim == 3:
-            ee_quat = ee_quat.squeeze(1)
 
         arm_distance = torch.linalg.norm(self._arm_goal_pos_w - ee_pos, dim=1)
         arm_distance_mapped = 1.0 - torch.tanh(arm_distance / 0.4)
 
-        # simple joint-motion penalty
+        progress = self._prev_arm_goal_distance - arm_distance
+        progress_reward = progress.clamp(-0.05, 0.05) * 150.0
+        self._prev_arm_goal_distance = arm_distance.detach()
+
         arm_qd = self._Ur10Arm.data.joint_vel
         arm_motion = torch.sum(arm_qd * arm_qd, dim=1)
 
-        # optional upright bonus can stay very small / zero-like for now
-        local_x = torch.tensor([1, 0, 0], device=ee_quat.device, dtype=ee_quat.dtype).expand(ee_quat.shape[0], 3)
-        ee_up = quat_apply(ee_quat, local_x)
-        z_alignment = ee_up[:, 2]
-
-        orientation_reward = z_alignment * self.cfg.orientation_reward_scale * 0.0 * self.step_dt
+        is_close = arm_distance < 0.10
+        reach_bonus = is_close.float() * 50.0 * self.step_dt
 
         rewards = {
-            "orientation_reward": orientation_reward,
+            "orientation_reward": torch.zeros_like(arm_distance),
             "wrist_height_reward": torch.zeros_like(arm_distance),
             "arm_go_safe": arm_distance_mapped * self.cfg.distance_to_goal_reward_scale * self.step_dt,
-            "arm_hold_still": -self.cfg.arm_hold_still_scale * arm_motion.clamp(max=20.0) * self.step_dt,
-            "arm_near_jitter": torch.zeros_like(arm_distance),
+            "arm_hold_still": -0.02 * arm_motion.clamp(max=20.0) * self.step_dt,
+            "arm_near_jitter": progress_reward + reach_bonus,
         }
 
         for k, v in rewards.items():
             if k in self._episode_sums:
                 self._episode_sums[k] += v
 
-        arm_total_reward = (
+        return (
             rewards["orientation_reward"]
             + rewards["wrist_height_reward"]
             + rewards["arm_go_safe"]
             + rewards["arm_hold_still"]
             + rewards["arm_near_jitter"]
         )
-
-        return arm_total_reward
-
+    
     # I will try to disable the ground collisions. 
     def _disable_ground_collisions(self, prim_path: str = "/World/ground"):
         """Disable collisions for the ground prim and its descendants (visual-only ground)."""
@@ -1193,18 +1207,22 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         else:
             wind_forces = torch.zeros((self.num_envs, 3), device=self.device)
 
-        # Cross-agent info
-        if self._include_cross_agent_info_in_obs:
-            drone_pos_for_arm = self._DroneRobot.data.root_pos_w
-        else:
-            drone_pos_for_arm = torch.zeros((self.num_envs, 3), device=self.device)
-
-        # Goal info
+        # Arm goal info.
         if self._include_goal_in_obs:
-            drone_goal_obs = self._drone_goal_pos_w
+            arm_goal_rel_obs = self._arm_goal_pos_w - self.ee_pos
+        else:
+            arm_goal_rel_obs = torch.zeros((self.num_envs, 3), device=self.device)
+
+        drone_pos_w = self._DroneRobot.data.root_pos_w
+        drone_local_pos = drone_pos_w - self._terrain.env_origins
+
+        # Goal info: relative vector from drone to goal.
+        # This tells the policy directly which direction the red dot is.
+        if self._include_goal_in_obs:
+            drone_goal_obs = self._drone_goal_pos_w - drone_pos_w
         else:
             drone_goal_obs = torch.zeros((self.num_envs, 3), device=self.device)
-
+        
         observations = {
             "_Ur10Arm": torch.cat(
                 (
@@ -1215,14 +1233,14 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
                     self.ee_lin_vel,
                     self.ee_ang_vel,
                     self.actions["_Ur10Arm"],
-                    drone_pos_for_arm,
+                    arm_goal_rel_obs,
                     wind_forces,
                 ),
                 dim=-1,
             ),
             "_DroneRobot": torch.cat(
                 (
-                    self._DroneRobot.data.root_pos_w,
+                    drone_local_pos,
                     self._DroneRobot.data.root_quat_w,
                     self._DroneRobot.data.root_lin_vel_w,
                     self._DroneRobot.data.root_ang_vel_w,
@@ -1479,15 +1497,10 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         """
         Phase-aware termination logic.
 
-        Returns:
-            terminated: termination signals excluding timeout
-            time_outs: timeout signals only
-
-        PACE 0:
-        - Shared termination behavior
-
-        Future:
-        - Independent drone / arm termination behavior
+        Important:
+        DirectMARLEnv resets cloned environments at the env level.
+        So if the drone dies, both agents in that env must receive the same
+        termination signal, otherwise the env may not reset.
         """
 
         # --- Boundary checks ---
@@ -1497,33 +1510,21 @@ class DronemultiagentMarlEnv(DirectMARLEnv):
         # --- Timeout ---
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
-        # ----------------------------
-        # SHARED termination (PACE 0 / shared phases)
-        # ----------------------------
-        if self._use_shared_success_condition:
-            terminated = {
-                "_DroneRobot": drone_oob,
-                "_Ur10Arm": drone_oob,
-            }
-            time_outs = {
-                "_DroneRobot": time_out,
-                "_Ur10Arm": time_out,
-            }
-            return terminated, time_outs
+        # If either important actor causes an env-level failure, reset the whole env.
+        # For PACE 1, drone_oob is the main reset trigger.
+        env_terminated = drone_oob | arm_oob
 
-        # ----------------------------
-        # SEPARATED termination (future phases)
-        # ----------------------------
-        else:
-            terminated = {
-                "_DroneRobot": drone_oob,
-                "_Ur10Arm": arm_oob,
-            }
-            time_outs = {
-                "_DroneRobot": time_out,
-                "_Ur10Arm": time_out,
-            }
-            return terminated, time_outs
+        terminated = {
+            "_DroneRobot": env_terminated,
+            "_Ur10Arm": env_terminated,
+        }
+
+        time_outs = {
+            "_DroneRobot": time_out,
+            "_Ur10Arm": time_out,
+        }
+
+        return terminated, time_outs
     
     def _reset_idx(self, env_ids: torch.Tensor | None):
         # Normalize env_ids to a 1D tensor of indices

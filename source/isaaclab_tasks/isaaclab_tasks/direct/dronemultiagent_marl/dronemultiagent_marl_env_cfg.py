@@ -210,7 +210,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     # =====================================================================
 
     vel_obs_scale = 0.2
-    act_moving_average = 1.0
+    act_moving_average = 0.05 #1.0
     
     # These toggles do not yet change behavior by themselves.
     # They exist so the environment code can later switch observation/state
@@ -301,7 +301,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     reset_spawn_margin_z = 0.10
     # Emergency world-Z kill switch for disabled-ground setups.
     # If the drone falls below this absolute world Z, terminate/reset it.
-    drone_world_z_kill = 0.05
+    drone_world_z_kill = 0.30
 
     # =====================================================================
     # 9) RESET SETTINGS
@@ -409,7 +409,7 @@ class DronemultiagentMarlEnvCfg(DirectMARLEnvCfg):
     wrist_height_penalty_scale = 0 #-180       # Penalize wrists being too low
     safe_z_alignment_threshold = 0.90
     arm_go_safe_scale = 1.0 
-    arm_hold_still_scale = 0.8 #was 0.5 
+    arm_hold_still_scale = 0.02 #was 0.8 
     arm_near_jitter_scale = 0.25  #was 0.05
 
     # ---------------------------------------------------------------------
